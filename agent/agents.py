@@ -136,12 +136,14 @@ class Agent:
         
         # === INITIALIZE GENERATORS ===
         self._initialize_generators()
-        
-       
-        
+
+        # === INITIALIZE BELIEF AND PRIOR FIELDS ===
+        self._initialize_belief_cholesky()
+        self._initialize_prior_cholesky()
+
         # Observations (set later)
         self.x_obs = None
-        
+
         # Cache flags
         self._transport_cache_dirty = True
     
