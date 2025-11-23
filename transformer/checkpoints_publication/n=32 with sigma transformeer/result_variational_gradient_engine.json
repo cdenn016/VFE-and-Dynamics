@@ -1,0 +1,10 @@
+{
+  "ffn_mode": "variational_gradient_engine",
+  "final_loss": 7.156949615478515,
+  "final_ppl": 30.78584098815918,
+  "random_ppl": 256,
+  "improvement": 8.315511020097274,
+  "total_params": 19263,
+  "vocab_size": 256,
+  "checkpoint": "checkpoints_publication\\ffn_variational_gradient_engine\\best_model.pt"
+}
