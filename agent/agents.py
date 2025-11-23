@@ -73,11 +73,16 @@ class Agent:
         - Belief distribution: q(c) = N(μ_q(c), Σ_q(c))
         - Prior distribution: p(c) = N(μ_p(c), Σ_p(c))
         - Gauge field: φ(c) ∈ so(3)
-    Fields:
-        L_q(c): Cholesky factor of belief covariance, shape (*S, K, K)
-        L_p(c): Cholesky factor of prior covariance, shape (*S, K, K)
+    Fields (GAUGE-COVARIANT STORAGE):
+        Sigma_q(c): Belief covariance (SPD), shape (*S, K, K) - PRIMARY
+        Sigma_p(c): Prior covariance (SPD), shape (*S, K, K) - PRIMARY
+        L_q(c), L_p(c): Cholesky factors (computed on-demand for sampling)
         mu_q(c), mu_p(c): Means (unchanged)
         phi(c): Gauge field (unchanged)
+
+    CRITICAL: We store Σ directly (not L) to preserve gauge covariance:
+        Under g ∈ SO(3): Σ → g Σ g^T (covariant)
+        But Cholesky(g Σ g^T) ≠ g · Cholesky(Σ) (NOT covariant)
     Hybrid approach: Currently full support (C_i = C), sparse support coming later.
     """
     
@@ -138,8 +143,8 @@ class Agent:
         self._initialize_generators()
 
         # === INITIALIZE BELIEF AND PRIOR FIELDS ===
-        self._initialize_belief_cholesky()
-        self._initialize_prior_cholesky()
+        self._initialize_belief_covariance()
+        self._initialize_prior_covariance()
 
         # === INITIALIZE GAUGE FIELD ===
         self._initialize_gauge()
@@ -150,33 +155,35 @@ class Agent:
         # Cache flags
         self._transport_cache_dirty = True
     
+    # =========================================================================
+    # Covariance Access (GAUGE-COVARIANT STORAGE)
+    # =========================================================================
+    # Sigma_q and Sigma_p are stored directly as fields (set in __init__)
+    # L_q and L_p are computed on-demand for sampling
+
     @property
-    def Sigma_q(self) -> np.ndarray:
+    def L_q(self) -> np.ndarray:
         """
-        Belief covariance Σ_q = L_q L_q^T.
-        
-        Computed from Cholesky factor. Always positive-definite by construction.
+        Belief Cholesky factor L_q where Σ_q = L_q L_q^T.
+
+        Computed on-demand from stored Sigma_q. Used for sampling.
+        CACHED for performance (invalidated when Sigma_q changes).
         """
-        return self._cholesky_to_cov(self.L_q)
-    
-    @Sigma_q.setter
-    def Sigma_q(self, value: np.ndarray):
-        """
-        Set belief covariance by computing its Cholesky factor.
-        
-        For backward compatibility. Prefer setting L_q directly.
-        """
-        self.L_q = self._cov_to_cholesky(value)
-    
+        if not hasattr(self, '_L_q_cache') or self._L_q_cache is None:
+            self._L_q_cache = self._cov_to_cholesky(self.Sigma_q)
+        return self._L_q_cache
+
     @property
-    def Sigma_p(self) -> np.ndarray:
-        """Prior covariance Σ_p = L_p L_p^T."""
-        return self._cholesky_to_cov(self.L_p)
-    
-    @Sigma_p.setter
-    def Sigma_p(self, value: np.ndarray):
-        """Set prior covariance by computing its Cholesky factor."""
-        self.L_p = self._cov_to_cholesky(value)
+    def L_p(self) -> np.ndarray:
+        """
+        Prior Cholesky factor L_p where Σ_p = L_p L_p^T.
+
+        Computed on-demand from stored Sigma_p. Used for sampling.
+        CACHED for performance (invalidated when Sigma_p changes).
+        """
+        if not hasattr(self, '_L_p_cache') or self._L_p_cache is None:
+            self._L_p_cache = self._cov_to_cholesky(self.Sigma_p)
+        return self._L_p_cache
     
     # =========================================================================
     # Cholesky Utilities
@@ -240,18 +247,20 @@ class Agent:
     # Initialization: Generate smooth L fields
     # =========================================================================
     
-    def _initialize_belief_cholesky(self):
+    def _initialize_belief_covariance(self):
         """
-        Initialize belief Cholesky factor L_q with smooth spatial structure.
+        Initialize belief covariance Σ_q with smooth spatial structure.
+
+        GAUGE-COVARIANT: Stores Σ_q directly (not Cholesky factor).
         """
         from agent.masking import FieldEnforcer, SupportRegionSmooth
-        
+
         spatial_shape = self.base_manifold.shape
         K = self.K
-        
+
         # Generate mean field
         if self.config.is_particle:
-            mu_q_raw = (0.1 * self.config.mu_scale * 
+            mu_q_raw = (0.1 * self.config.mu_scale *
                        self.rng.standard_normal(K)).astype(np.float32)
         else:
             mu_q_raw = self._generate_smooth_mean_field(
@@ -259,7 +268,7 @@ class Agent:
                 scale=1.5 * self.config.mu_scale,
                 smoothness_scale=self.config.mean_smoothness_scale_effective
             )
-        
+
         # Generate smooth Σ field
         if self.config.covariance_strategy == "constant":
             from math_utils.sigma import generate_constant_field_safe
@@ -273,34 +282,31 @@ class Agent:
             Sigma_q_raw = self.cov_initializer.generate_for_agent(
                 self, scale=self.config.sigma_scale, rng=self.rng
             )
-        
-        # Convert to Cholesky factor
-        L_q_raw = self._cov_to_cholesky(Sigma_q_raw)
-        
-        # Enforce support constraints on L
+
+        # Enforce support constraints on Sigma directly
         if hasattr(self, 'support') and self.support is not None:
             # Check if we need to upgrade to SupportRegionSmooth
             if not isinstance(self.support, SupportRegionSmooth):
-                # 🔥 FIX: Get mask from support, shape from base_manifold
+                # Get mask from support, shape from base_manifold
                 mask_binary = getattr(self.support, 'mask', None)
                 if mask_binary is None:
                     mask_binary = getattr(self.support, 'mask_binary', None)
                 if mask_binary is None:
                     # No mask - use full support
                     mask_binary = np.ones(spatial_shape, dtype=bool)
-                
+
                 self.support = SupportRegionSmooth(
                     mask_binary=mask_binary,
-                    base_shape=spatial_shape,  # 🔥 Use agent's base_manifold.shape
+                    base_shape=spatial_shape,
                     config=self.config.mask_config
                 )
-            
+
             # Enforce mean
             self.mu_q = FieldEnforcer.enforce_mean_field(mu_q_raw, self.support)
-            
-            # Enforce Cholesky factor
-            self.L_q = FieldEnforcer.enforce_cholesky_field(
-                L_q_raw,
+
+            # Enforce covariance field directly (GAUGE-COVARIANT)
+            self.Sigma_q = FieldEnforcer.enforce_covariance_field(
+                Sigma_q_raw,
                 self.support,
                 inside_scale=self.config.sigma_scale,
                 outside_scale=self.config.mask_config.outside_cov_scale,
@@ -308,26 +314,33 @@ class Agent:
             )
         else:
             self.mu_q = mu_q_raw
-            self.L_q = L_q_raw
-        
-        # Validate: Σ = LL^T should be SPD
-        self._validate_covariance_field(self.Sigma_q, "Σ_q (from L_q)")
+            self.Sigma_q = Sigma_q_raw
+
+        # Initialize L_q cache as None (computed on first access)
+        self._L_q_cache = None
+
+        # Validate: Σ_q should be SPD
+        self._validate_covariance_field(self.Sigma_q, "Σ_q")
     
     
-    def _initialize_prior_cholesky(self):
-        """Initialize prior Cholesky factor L_p."""
+    def _initialize_prior_covariance(self):
+        """
+        Initialize prior covariance Σ_p with smooth spatial structure.
+
+        GAUGE-COVARIANT: Stores Σ_p directly (not Cholesky factor).
+        """
         from agent.masking import FieldEnforcer, SupportRegionSmooth
-        
+
         spatial_shape = self.base_manifold.shape
         K = self.K
-        
+
         # Generate smooth mean (flatter than beliefs)
         mu_p_raw = self._generate_smooth_mean_field(
             spatial_shape, K,
             scale=1.0 * self.config.mu_scale,
             smoothness_scale=self.config.mean_smoothness_scale_effective
         )
-        
+
         # Generate smooth Σ field
         if self.config.covariance_strategy == "constant":
             from math_utils.sigma import generate_constant_field_safe
@@ -341,30 +354,28 @@ class Agent:
             Sigma_p_raw = self.cov_initializer.generate_for_agent(
                 self, scale=1.0 * self.config.sigma_scale, rng=self.rng
             )
-        
-        # Convert to Cholesky
-        L_p_raw = self._cov_to_cholesky(Sigma_p_raw)
-        
-        # Enforce support constraints
+
+        # Enforce support constraints on Sigma directly
         if hasattr(self, 'support') and self.support is not None:
             if not isinstance(self.support, SupportRegionSmooth):
-                # 🔥 FIX: Get mask from support, shape from base_manifold
+                # Get mask from support, shape from base_manifold
                 mask_binary = getattr(self.support, 'mask', None)
                 if mask_binary is None:
                     mask_binary = getattr(self.support, 'mask_binary', None)
                 if mask_binary is None:
                     mask_binary = np.ones(spatial_shape, dtype=bool)
-                
+
                 self.support = SupportRegionSmooth(
                     mask_binary=mask_binary,
-                    base_shape=spatial_shape,  # 🔥 Use agent's base_manifold.shape
+                    base_shape=spatial_shape,
                     config=self.config.mask_config
                 )
-            
+
             self.mu_p = FieldEnforcer.enforce_mean_field(mu_p_raw, self.support)
-            
-            self.L_p = FieldEnforcer.enforce_cholesky_field(
-                L_p_raw,
+
+            # Enforce covariance field directly (GAUGE-COVARIANT)
+            self.Sigma_p = FieldEnforcer.enforce_covariance_field(
+                Sigma_p_raw,
                 self.support,
                 inside_scale=1.0 * self.config.sigma_scale,
                 outside_scale=self.config.mask_config.outside_cov_scale,
@@ -372,9 +383,12 @@ class Agent:
             )
         else:
             self.mu_p = mu_p_raw
-            self.L_p = L_p_raw
-        
-        self._validate_covariance_field(self.Sigma_p, "Σ_p (from L_p)")
+            self.Sigma_p = Sigma_p_raw
+
+        # Initialize L_p cache as None (computed on first access)
+        self._L_p_cache = None
+
+        self._validate_covariance_field(self.Sigma_p, "Σ_p")
 
     # =============================================================================
     # SECTION 1: Backward Compatibility Aliases
@@ -734,14 +748,14 @@ class Agent:
     def enforce_support_constraints(self):
         """
         Re-apply support constraints to current fields.
-        
-        NOW OPERATES ON CHOLESKY FACTORS!
+
+        GAUGE-COVARIANT: Operates directly on Σ fields (not Cholesky).
         """
         from agent.masking import FieldEnforcer, SupportRegionSmooth
-        
+
         if not hasattr(self, 'support') or self.support is None:
             return
-        
+
         # Ensure smooth support
         if not isinstance(self.support, SupportRegionSmooth):
             # Get mask and shape
@@ -750,43 +764,37 @@ class Agent:
                 mask_binary = getattr(self.support, 'mask_binary', None)
             if mask_binary is None:
                 mask_binary = np.ones(self.base_manifold.shape, dtype=bool)
-            
+
             self.support = SupportRegionSmooth(
                 mask_binary=mask_binary,
-                base_shape=self.base_manifold.shape,  # 🔥 FIX
+                base_shape=self.base_manifold.shape,
                 config=self.config.mask_config
             )
-        
+
             # --- μ fields ---
             self.mu_q = FieldEnforcer.enforce_mean_field(self.mu_q, self.support)
             self.mu_p = FieldEnforcer.enforce_mean_field(self.mu_p, self.support)
-            
-            # --- Σ fields: enforce in covariance space, NOT Cholesky! ---
-            # Convert L_q → Σ_q
-            Sigma_q = self.L_q @ np.swapaxes(self.L_q, -1, -2)
-            
-            # Enforce mask on Σ_q (GI-consistent)
-            Sigma_q_masked = FieldEnforcer.enforce_covariance_field(
-                Sigma_q,
+
+            # --- Σ fields: enforce directly (GAUGE-COVARIANT) ---
+            self.Sigma_q = FieldEnforcer.enforce_covariance_field(
+                self.Sigma_q,
                 self.support,
                 inside_scale=self.config.sigma_scale,
                 outside_scale=self.config.mask_config.outside_cov_scale,
                 use_smooth_transition=self.config.mask_config.use_smooth_cov_transition,
             )
-            
-            # Re-Cholesky Σ_q
-            self.L_q = np.linalg.cholesky(Sigma_q_masked)
-            
-            # --- Repeat for Σ_p ---
-            Sigma_p = self.L_p @ np.swapaxes(self.L_p, -1, -2)
-            Sigma_p_masked = FieldEnforcer.enforce_covariance_field(
-                Sigma_p,
+
+            self.Sigma_p = FieldEnforcer.enforce_covariance_field(
+                self.Sigma_p,
                 self.support,
                 inside_scale=2.0 * self.config.sigma_scale,
                 outside_scale=self.config.mask_config.outside_cov_scale,
                 use_smooth_transition=self.config.mask_config.use_smooth_cov_transition,
             )
-            self.L_p = np.linalg.cholesky(Sigma_p_masked)
+
+            # Invalidate Cholesky caches
+            self._L_q_cache = None
+            self._L_p_cache = None
             
           
         self.gauge.phi = FieldEnforcer.enforce_gauge_field(

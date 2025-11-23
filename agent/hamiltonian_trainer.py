@@ -138,6 +138,7 @@ class HamiltonianHistory:
         Save agent state snapshot for later metric analysis.
 
         Stores copies of all agent fields needed to compute pullback metrics.
+        GAUGE-COVARIANT: Stores Σ directly (not Cholesky factors).
 
         Args:
             step: Current training step
@@ -152,9 +153,9 @@ class HamiltonianHistory:
             agent_data = {
                 'agent_id': agent.agent_id,
                 'mu_q': agent.mu_q.copy(),
-                'L_q': agent.L_q.copy(),
+                'Sigma_q': agent.Sigma_q.copy(),  # Store Σ directly (gauge-covariant)
                 'mu_p': agent.mu_p.copy(),
-                'L_p': agent.L_p.copy(),
+                'Sigma_p': agent.Sigma_p.copy(),  # Store Σ directly (gauge-covariant)
             }
 
             # Add gauge field if present

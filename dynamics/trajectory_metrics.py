@@ -147,14 +147,22 @@ def reconstruct_agent_state_from_snapshot(
 
     # Extract fields
     mu_q = agent_data['mu_q']
-    L_q = agent_data['L_q']
     mu_p = agent_data['mu_p']
-    L_p = agent_data['L_p']
 
-    # Compute Sigma from Cholesky factors
-    # Σ = L @ L^T
-    Sigma_q = np.einsum('...ij,...kj->...ik', L_q, L_q, optimize=True)
-    Sigma_p = np.einsum('...ij,...kj->...ik', L_p, L_p, optimize=True)
+    # GAUGE-COVARIANT: Prefer Sigma directly (new format)
+    # Fall back to computing from L (old format, backwards compat)
+    if 'Sigma_q' in agent_data:
+        Sigma_q = agent_data['Sigma_q']
+        Sigma_p = agent_data['Sigma_p']
+        # Compute L on-demand if needed (for backwards compat)
+        L_q = agent_data.get('L_q', np.linalg.cholesky(Sigma_q))
+        L_p = agent_data.get('L_p', np.linalg.cholesky(Sigma_p))
+    else:
+        # Old format: compute Sigma from L
+        L_q = agent_data['L_q']
+        L_p = agent_data['L_p']
+        Sigma_q = np.einsum('...ij,...kj->...ik', L_q, L_q, optimize=True)
+        Sigma_p = np.einsum('...ij,...kj->...ik', L_p, L_p, optimize=True)
 
     return {
         'mu_q': mu_q,
