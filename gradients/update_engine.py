@@ -119,7 +119,7 @@ class GradientApplier:
             agent.mu_q = agent.mu_q + lr_mu_q * grad.delta_mu_q
 
         # -----------------------------------------------------------------
-        # 2. Update belief covariance Σ_q (SPD manifold)
+        # 2. Update belief covariance Σ_q (SPD manifold, GAUGE-COVARIANT)
         # -----------------------------------------------------------------
         if lr_sigma_q != 0.0 and grad.delta_Sigma_q is not None:
             Sigma_q_new = retract_spd(
@@ -130,6 +130,9 @@ class GradientApplier:
                 max_condition=max_condition,
             )
             agent.Sigma_q = Sigma_q_new.astype(np.float32)
+            # Invalidate Cholesky cache (L_q computed on-demand)
+            if hasattr(agent, '_L_q_cache'):
+                agent._L_q_cache = None
 
         # -----------------------------------------------------------------
         # 3. Update prior mean μ_p (Euclidean)
@@ -138,7 +141,7 @@ class GradientApplier:
             agent.mu_p = agent.mu_p + lr_mu_p * grad.delta_mu_p
 
         # -----------------------------------------------------------------
-        # 4. Update prior covariance Σ_p (SPD manifold)
+        # 4. Update prior covariance Σ_p (SPD manifold, GAUGE-COVARIANT)
         # -----------------------------------------------------------------
         if lr_sigma_p != 0.0 and grad.delta_Sigma_p is not None:
             Sigma_p_new = retract_spd(
@@ -149,6 +152,9 @@ class GradientApplier:
                 max_condition=max_condition,
             )
             agent.Sigma_p = Sigma_p_new.astype(np.float32)
+            # Invalidate Cholesky cache (L_p computed on-demand)
+            if hasattr(agent, '_L_p_cache'):
+                agent._L_p_cache = None
 
         # -----------------------------------------------------------------
         # 5. Update gauge field φ (SO(3) → principal ball)
@@ -184,33 +190,37 @@ class GradientApplier:
         """
         Enforce identical priors across all agents.
 
-        Computes shared prior (μ_p, L_p) from average and applies to all agents.
+        Computes shared prior (μ_p, Σ_p) from average and applies to all agents.
 
-        CRITICAL: We average and set L_p (Cholesky factor), NOT Σ_p directly!
-        This matches the behavior in MultiAgentSystem._apply_identical_priors_now().
+        GAUGE-COVARIANT: We average Σ_p directly (not Cholesky factors).
+        Averaging on the SPD manifold (arithmetic mean is SPD if all inputs are SPD).
 
         Args:
             agents: List of agents to synchronize
 
         Post-conditions:
             - All agents have identical μ_p
-            - All agents have identical L_p (hence identical Σ_p)
-            - Caches invalidated
+            - All agents have identical Σ_p
+            - Cholesky caches invalidated
         """
         if len(agents) == 0:
             return
 
-        # Compute average prior (using L_p, not Sigma_p!)
+        # Compute average prior (using Σ_p, GAUGE-COVARIANT!)
         mu_p_sum = sum(agent.mu_p for agent in agents)
-        L_p_sum = sum(agent.L_p for agent in agents)
+        Sigma_p_sum = sum(agent.Sigma_p for agent in agents)
 
         mu_p_shared = mu_p_sum / len(agents)
-        L_p_shared = L_p_sum / len(agents)
+        Sigma_p_shared = Sigma_p_sum / len(agents)
 
         # Apply to all agents
         for agent in agents:
             agent.mu_p = mu_p_shared.copy()
-            agent.L_p = L_p_shared.copy()  # Sets Σ_p = L_p @ L_p.T automatically
+            agent.Sigma_p = Sigma_p_shared.copy()
+
+            # Invalidate Cholesky cache
+            if hasattr(agent, '_L_p_cache'):
+                agent._L_p_cache = None
 
             if hasattr(agent, 'invalidate_caches'):
                 agent.invalidate_caches()
