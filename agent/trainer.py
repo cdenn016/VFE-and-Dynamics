@@ -39,23 +39,27 @@ from gradients.update_engine import GradientApplier
 @dataclass
 class TrainingHistory:
     """Container for training metrics over time."""
-    
+
     steps: List[int] = field(default_factory=list)
-    
+
     # Energy components
     total_energy: List[float] = field(default_factory=list)
     self_energy: List[float] = field(default_factory=list)
     belief_align: List[float] = field(default_factory=list)
     prior_align: List[float] = field(default_factory=list)
     observations: List[float] = field(default_factory=list)
-    
+
     # Gradient norms (for diagnostics)
     grad_norm_mu_q: List[float] = field(default_factory=list)
     grad_norm_Sigma_q: List[float] = field(default_factory=list)
     grad_norm_phi: List[float] = field(default_factory=list)
-    
+
     # Mu center tracking
     mu_tracker: Optional[MuCenterTracking] = None
+
+    # NEW: Agent snapshots for metric evolution analysis
+    agent_snapshots: List[dict] = field(default_factory=list)
+    snapshot_steps: List[int] = field(default_factory=list)
     
 # agent/trainer.py
 
@@ -92,9 +96,45 @@ class TrainingHistory:
         # Mu tracking
         if self.mu_tracker is None and system is not None:
             self.mu_tracker = create_mu_tracker(system)
-    
+
         if self.mu_tracker is not None and system is not None:
             self.mu_tracker.record(step, system)
+
+    def save_snapshot(self, step: int, system):
+        """
+        Save agent state snapshot for later metric analysis.
+
+        Stores copies of all agent fields needed to compute pullback metrics:
+            - mu_q, L_q (belief mean and Cholesky factor)
+            - mu_p, L_p (prior mean and Cholesky factor)
+            - phi (gauge field, if present)
+
+        Args:
+            step: Current training step
+            system: MultiAgentSystem to snapshot
+        """
+        snapshot = {
+            'step': step,
+            'agents': []
+        }
+
+        for agent in system.agents:
+            agent_data = {
+                'agent_id': agent.agent_id,
+                'mu_q': agent.mu_q.copy(),
+                'L_q': agent.L_q.copy(),
+                'mu_p': agent.mu_p.copy(),
+                'L_p': agent.L_p.copy(),
+            }
+
+            # Add gauge field if present
+            if hasattr(agent, 'gauge') and hasattr(agent.gauge, 'phi'):
+                agent_data['phi'] = agent.gauge.phi.copy()
+
+            snapshot['agents'].append(agent_data)
+
+        self.agent_snapshots.append(snapshot)
+        self.snapshot_steps.append(step)
 
 
 class Trainer:
@@ -229,10 +269,15 @@ class Trainer:
                     self._log_step(step, energies)
                 
                 # Checkpointing
-                if (self.config.checkpoint_dir is not None and 
-                    step % self.config.checkpoint_every == 0 and 
+                if (self.config.checkpoint_dir is not None and
+                    step % self.config.checkpoint_every == 0 and
                     step > 0):
                     self._save_checkpoint(step)
+
+                # Snapshot saving for metric analysis
+                if (self.config.save_snapshots and
+                    step % self.config.snapshot_every == 0):
+                    self.history.save_snapshot(step, self.system)
 
                 # Early stopping check
                 if self.config.early_stop_threshold is not None:

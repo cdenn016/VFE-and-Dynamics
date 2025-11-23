@@ -442,7 +442,11 @@ class TrainingConfig:
     # Logging and diagnostics
     log_every: int = 1
     save_history: bool = True
-    
+
+    # Snapshot storage for metric analysis
+    save_snapshots: bool = False  # Enable agent state snapshots
+    snapshot_every: int = 10  # Save snapshot every N steps
+
     # Early stopping
     early_stop_threshold: Optional[float] = None  # Min energy decrease
     early_stop_patience: int = 50  # Steps without improvement
