@@ -39,6 +39,10 @@ from geometry.signature_analysis import (
     analyze_metric_signature,
     MetricSignature
 )
+from dynamics.trajectory_metrics import (
+    compute_trajectory_pullback_metrics,
+    analyze_signature_evolution
+)
 
 
 class Arrow3D(FancyArrowPatch):
@@ -352,7 +356,7 @@ def plot_trajectory_metric_signature(
     as beliefs evolve? Do we find Lorentzian regions?
 
     Args:
-        history: Training history
+        history: Training history (must have agent_snapshots if available)
         system: MultiAgentSystem (for computing pullback metric)
         out_dir: Output directory
         point_idx: Which base manifold point
@@ -364,27 +368,66 @@ def plot_trajectory_metric_signature(
 
     agent = system.agents[agent_idx]
 
-    # Compute metric signature at each step along trajectory
-    # NOTE: This requires storing agent state at each step, or recomputing
-    # For now, we'll compute at the final state (placeholder)
-    # Full implementation would require trajectory snapshots
+    # Check if we have snapshots for time-varying metric analysis
+    has_snapshots = (hasattr(history, 'agent_snapshots') and
+                     len(history.agent_snapshots) > 0)
 
     signatures = []
     eigenvalues_list = []
     n_negative_list = []
 
-    # Compute pullback metric at current point
-    g = compute_pullback_metric(agent, point_idx=point_idx)
-    sig = analyze_metric_signature(g)
+    if has_snapshots:
+        # ✨ NEW: Compute time-varying pullback metrics from snapshots
+        print(f"  Computing time-varying pullback metrics from {len(history.agent_snapshots)} snapshots...")
 
-    # Store (repeated for now - proper implementation needs time-varying metric)
-    for t in range(T):
-        signatures.append(sig.signature.value)
-        eigenvalues_list.append(sig.eigenvalues)
-        n_negative_list.append(sig.signature_tuple[0])
+        try:
+            traj_metrics = compute_trajectory_pullback_metrics(
+                history,
+                agent_idx=agent_idx,
+                point_idx=point_idx,
+                metric_type="belief"
+            )
 
-    eigenvalues_array = np.array(eigenvalues_list)  # (T, d)
-    n_negative_array = np.array(n_negative_list)  # (T,)
+            # Extract eigenvalue trajectories and signatures
+            eigenvalues_array = traj_metrics.get_eigenvalue_trajectories()  # (T, d)
+            signature_sequence = traj_metrics.get_signature_sequence()
+
+            # Convert signatures to counts of negative eigenvalues
+            signature_map = {
+                "riemannian": 0,
+                "lorentzian": 1,
+                "indefinite": 2,  # Simplified - could be more
+                "degenerate": -1
+            }
+            n_negative_array = np.array([
+                signature_map.get(sig, -1) for sig in signature_sequence
+            ])
+
+            # Use snapshot steps (may be subset of all steps)
+            steps = np.array(traj_metrics.steps)
+
+            print(f"  ✓ Computed {len(traj_metrics.metrics)} time-varying metrics")
+
+        except Exception as e:
+            print(f"  ⚠️  Failed to compute trajectory metrics: {e}")
+            print(f"  Falling back to static metric computation...")
+            has_snapshots = False  # Fall through to static computation
+
+    if not has_snapshots:
+        # Fallback: Static metric (computed once at final state)
+        print(f"  ⚠️  No snapshots available - using static metric (repeated for all steps)")
+
+        g = compute_pullback_metric(agent, point_idx=point_idx)
+        sig = analyze_metric_signature(g)
+
+        # Repeat static metric for all timesteps
+        for t in range(T):
+            signatures.append(sig.signature.value)
+            eigenvalues_list.append(sig.eigenvalues)
+            n_negative_list.append(sig.signature_tuple[0])
+
+        eigenvalues_array = np.array(eigenvalues_list)  # (T, d)
+        n_negative_array = np.array(n_negative_list)  # (T,)
 
     # Create visualization
     fig, axes = plt.subplots(2, 1, figsize=(10, 8))
@@ -421,9 +464,23 @@ def plot_trajectory_metric_signature(
 
     # Print summary
     print(f"\n📊 Signature Summary (Agent {agent_idx}, Point {point_idx}):")
-    print(f"  Final signature: {sig.signature.value}")
-    print(f"  Final eigenvalues: {sig.eigenvalues}")
-    print(f"  Lorentzian steps: {np.sum(n_negative_array == 1)}/{T}")
+    if has_snapshots:
+        # Time-varying metrics summary
+        from collections import Counter
+        sig_counts = Counter(signature_sequence)
+        print(f"  Signature distribution:")
+        for sig_type, count in sig_counts.items():
+            frac = count / len(signature_sequence)
+            print(f"    {sig_type}: {count}/{len(signature_sequence)} ({frac:.1%})")
+        print(f"  Final eigenvalues: {eigenvalues_array[-1]}")
+        if signature_sequence:
+            print(f"  Final signature: {signature_sequence[-1]}")
+    else:
+        # Static metric summary
+        print(f"  Final signature: {sig.signature.value}")
+        print(f"  Final eigenvalues: {sig.eigenvalues}")
+
+    print(f"  Lorentzian steps: {np.sum(n_negative_array == 1)}/{len(n_negative_array)}")
 
 
 def plot_trajectory_phase_space(
@@ -526,9 +583,27 @@ def plot_trajectory_dashboard(
 
     agent = system.agents[agent_idx]
 
-    # Compute metric signature
-    g = compute_pullback_metric(agent, point_idx=point_idx)
-    sig = analyze_metric_signature(g)
+    # Check if we have snapshots for time-varying metric analysis
+    has_snapshots = (hasattr(history, 'agent_snapshots') and
+                     len(history.agent_snapshots) > 0)
+
+    if has_snapshots:
+        try:
+            traj_metrics = compute_trajectory_pullback_metrics(
+                history,
+                agent_idx=agent_idx,
+                point_idx=point_idx,
+                metric_type="belief"
+            )
+            eigenvalues_array = traj_metrics.get_eigenvalue_trajectories()
+            metric_steps = np.array(traj_metrics.steps)
+        except:
+            has_snapshots = False
+
+    if not has_snapshots:
+        # Fallback: static metric
+        g = compute_pullback_metric(agent, point_idx=point_idx)
+        sig = analyze_metric_signature(g)
 
     fig = plt.figure(figsize=(16, 12))
     gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
@@ -556,15 +631,26 @@ def plot_trajectory_dashboard(
     ax2.set_title('Tangent Vector Magnitude')
     ax2.grid(alpha=0.3)
 
-    # Bottom left: Eigenvalues
+    # Bottom left: Eigenvalues (time-varying or static)
     ax3 = fig.add_subplot(gs[1, 0])
-    d = len(sig.eigenvalues)
-    for i in range(d):
-        ax3.axhline(sig.eigenvalues[i], label=f'λ_{i} = {sig.eigenvalues[i]:.3f}',
-                    linewidth=2)
+    if has_snapshots:
+        # Time-varying eigenvalues
+        d = eigenvalues_array.shape[1]
+        for i in range(d):
+            ax3.plot(metric_steps, eigenvalues_array[:, i], label=f'λ_{i}',
+                     linewidth=2)
+        ax3.set_xlabel('Training Step')
+        ax3.set_title('Metric Eigenvalues Evolution')
+    else:
+        # Static eigenvalues (horizontal lines)
+        d = len(sig.eigenvalues)
+        for i in range(d):
+            ax3.axhline(sig.eigenvalues[i], label=f'λ_{i} = {sig.eigenvalues[i]:.3f}',
+                        linewidth=2)
+        ax3.set_title(f'Metric Eigenvalues ({sig.signature.value})')
+
     ax3.axhline(0, color='black', linestyle='--', alpha=0.3, linewidth=1)
     ax3.set_ylabel('Eigenvalue')
-    ax3.set_title(f'Metric Eigenvalues ({sig.signature.value})')
     ax3.legend()
     ax3.grid(alpha=0.3)
 
