@@ -141,6 +141,9 @@ class Agent:
         self._initialize_belief_cholesky()
         self._initialize_prior_cholesky()
 
+        # === INITIALIZE GAUGE FIELD ===
+        self._initialize_gauge()
+
         # Observations (set later)
         self.x_obs = None
 
