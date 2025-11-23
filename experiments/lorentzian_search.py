@@ -30,6 +30,7 @@ import json
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
 import time
+from collections import Counter
 
 from agent.system import MultiAgentSystem
 from agent.agents import Agent
@@ -113,39 +114,8 @@ def create_search_configs() -> List[SearchConfig]:
         lambda_self=1.0,
         lambda_belief_align=0.0
     ))
-    
-    # === HYPOTHESIS 1: Competing Forces ===
-    configs.append(SearchConfig(
-        name="competing_weak",
-        description="Weak competing forces: belief_align vs prior_align",
-        spatial_shape=(8, 8),
-        K=3,
-        lambda_self=1.0,
-        lambda_belief_align=1.0,
-        lambda_prior_align=-0.3  # Weak opposition
-    ))
-    
-    configs.append(SearchConfig(
-        name="competing_moderate",
-        description="Moderate competing forces",
-        spatial_shape=(8, 8),
-        K=3,
-        lambda_self=1.0,
-        lambda_belief_align=1.0,
-        lambda_prior_align=-0.8  # Stronger opposition
-    ))
-    
-    configs.append(SearchConfig(
-        name="competing_strong",
-        description="Strong competing forces",
-        spatial_shape=(8, 8),
-        K=3,
-        lambda_self=1.0,
-        lambda_belief_align=1.5,
-        lambda_prior_align=-1.0  # Strong opposition
-    ))
-    
-    # === HYPOTHESIS 2: Strong Gauge Dynamics ===
+
+    # === HYPOTHESIS 1: Strong Gauge Dynamics ===
     configs.append(SearchConfig(
         name="gauge_weak",
         description="Weak gauge field dynamics",
@@ -221,20 +191,7 @@ def create_search_configs() -> List[SearchConfig]:
         lambda_belief_align=1.0,
         lr_sigma_q=0.001  # Slower, sharper changes
     ))
-    
-    # === HYPOTHESIS 5: Multi-force Interactions ===
-    configs.append(SearchConfig(
-        name="multi_force",
-        description="Multiple forces competing",
-        spatial_shape=(8, 8),
-        K=3,
-        lambda_self=1.0,
-        lambda_belief_align=1.5,
-        lambda_prior_align=-0.5,
-        lambda_phi=1.0,
-        lr_phi=0.03
-    ))
-    
+
     return configs
 
 
@@ -273,16 +230,15 @@ def run_single_config(config: SearchConfig, results_dir: Path) -> SearchResult:
     
     # Train
     if config.use_hamiltonian:
-        from config import HamiltonianConfig
-        train_config = HamiltonianConfig(
+        train_config = TrainingConfig(
             n_steps=config.n_steps,
-            dt=0.01,
-            friction=config.friction,
+            lr_mu_q=0.01,  # Not used for Hamiltonian, but required
+            lr_sigma_q=0.01,
             save_snapshots=True,
             snapshot_every=config.snapshot_every,
             log_every=50
         )
-        trainer = HamiltonianTrainer(system, train_config)
+        trainer = HamiltonianTrainer(system, train_config, friction=config.friction)
     else:
         train_config = TrainingConfig(
             n_steps=config.n_steps,
