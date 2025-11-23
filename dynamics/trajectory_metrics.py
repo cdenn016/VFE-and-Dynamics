@@ -257,15 +257,36 @@ def compute_trajectory_pullback_metrics(
 
             # Analyze signature
             # Extract metric at specified point
+            # Handle point_idx as either int (1D) or tuple (2D/3D)
             if induced_metric.G.ndim == 3:
                 # 1D field: (n_points, 1, 1)
+                # point_idx should be int
+                if isinstance(point_idx, tuple):
+                    point_idx = point_idx[0]
                 G_at_point = induced_metric.G[point_idx]
             elif induced_metric.G.ndim == 4:
                 # 2D field: (H, W, 2, 2)
-                H, W = induced_metric.spatial_shape
-                x = point_idx // W
-                y = point_idx % W
+                if isinstance(point_idx, tuple):
+                    # point_idx is (x, y)
+                    x, y = point_idx
+                else:
+                    # point_idx is flat index - convert to 2D
+                    H, W = induced_metric.spatial_shape
+                    x = point_idx // W
+                    y = point_idx % W
                 G_at_point = induced_metric.G[x, y]
+            elif induced_metric.G.ndim == 5:
+                # 3D field: (H, W, D, 3, 3)
+                if isinstance(point_idx, tuple):
+                    # point_idx is (x, y, z)
+                    G_at_point = induced_metric.G[point_idx]
+                else:
+                    # point_idx is flat index - convert to 3D
+                    H, W, D = induced_metric.spatial_shape
+                    x = point_idx // (W * D)
+                    y = (point_idx // D) % W
+                    z = point_idx % D
+                    G_at_point = induced_metric.G[x, y, z]
             else:
                 raise ValueError(f"Unexpected metric shape: {induced_metric.G.shape}")
 
@@ -284,6 +305,14 @@ def compute_trajectory_pullback_metrics(
             continue
 
     print(f"✓ Computed {len(metrics)} pullback metrics")
+
+    # Check if any metrics were computed
+    if len(metrics) == 0:
+        raise ValueError(
+            f"Failed to compute any pullback metrics for agent {agent_idx} at point {point_idx}. "
+            "This likely indicates a dimension mismatch or other geometric issue. "
+            "Check that point_idx matches the spatial dimensionality."
+        )
 
     # Create trajectory metrics object
     traj_metrics = TrajectoryMetrics(
@@ -330,11 +359,16 @@ def analyze_signature_evolution(
     from collections import Counter
     sig_counts = Counter(signatures)
 
-    lorentzian_frac = sig_counts.get("lorentzian", 0) / len(signatures)
-    riemannian_frac = sig_counts.get("riemannian", 0) / len(signatures)
-
-    # Find dominant signature
-    dominant_sig = max(sig_counts.items(), key=lambda x: x[1])[0] if sig_counts else None
+    # Handle empty signature case
+    if len(signatures) == 0:
+        lorentzian_frac = 0.0
+        riemannian_frac = 0.0
+        dominant_sig = None
+    else:
+        lorentzian_frac = sig_counts.get("lorentzian", 0) / len(signatures)
+        riemannian_frac = sig_counts.get("riemannian", 0) / len(signatures)
+        # Find dominant signature
+        dominant_sig = max(sig_counts.items(), key=lambda x: x[1])[0] if sig_counts else None
 
     analysis = {
         'signature_sequence': signatures,
