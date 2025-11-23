@@ -77,6 +77,10 @@ class HamiltonianHistory:
     # Mu center tracking
     mu_tracker: Optional[MuCenterTracking] = None
 
+    # Agent snapshots for metric evolution analysis
+    agent_snapshots: List[dict] = field(default_factory=list)
+    snapshot_steps: List[int] = field(default_factory=list)
+
     def record(self, step: int, energies: FreeEnergyBreakdown,
                hamiltonian_energies: Optional[Tuple[float, float, float]] = None,
                momentum_norm: float = 0.0,
@@ -128,6 +132,39 @@ class HamiltonianHistory:
 
         if self.mu_tracker is not None and system is not None:
             self.mu_tracker.record(step, system)
+
+    def save_snapshot(self, step: int, system):
+        """
+        Save agent state snapshot for later metric analysis.
+
+        Stores copies of all agent fields needed to compute pullback metrics.
+
+        Args:
+            step: Current training step
+            system: MultiAgentSystem to snapshot
+        """
+        snapshot = {
+            'step': step,
+            'agents': []
+        }
+
+        for agent in system.agents:
+            agent_data = {
+                'agent_id': agent.agent_id,
+                'mu_q': agent.mu_q.copy(),
+                'L_q': agent.L_q.copy(),
+                'mu_p': agent.mu_p.copy(),
+                'L_p': agent.L_p.copy(),
+            }
+
+            # Add gauge field if present
+            if hasattr(agent, 'gauge') and hasattr(agent.gauge, 'phi'):
+                agent_data['phi'] = agent.gauge.phi.copy()
+
+            snapshot['agents'].append(agent_data)
+
+        self.agent_snapshots.append(snapshot)
+        self.snapshot_steps.append(step)
 
 
 class HamiltonianTrainer:
@@ -530,6 +567,11 @@ class HamiltonianTrainer:
                 # Logging
                 if step % self.config.log_every == 0:
                     self._log_step(step, energies)
+
+                # Snapshot saving for metric analysis
+                if (self.config.save_snapshots and
+                    step % self.config.snapshot_every == 0):
+                    self.history.save_snapshot(step, self.system)
 
         except KeyboardInterrupt:
             print("\n⚠ Training interrupted by user")
