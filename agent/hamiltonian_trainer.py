@@ -404,14 +404,89 @@ class HamiltonianTrainer:
 
         return V
 
+    def _compute_complete_mass_matrix(self, agent, agent_idx: int) -> np.ndarray:
+        """
+        Compute COMPLETE Fisher-Rao mass matrix with coupling terms.
+
+        M_i = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
+
+        Components:
+        - Σ_p^{-1}: Bare mass from prior precision (constant, quasi-static)
+        - Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T: Relational mass from consensus coupling
+
+        Args:
+            agent: Agent whose mass matrix to compute
+            agent_idx: Agent index in system
+
+        Returns:
+            M: Mass matrix per spatial point, shape (*S, K, K)
+        """
+        from gradients.softmax_grads import compute_softmax_weights
+
+        K = agent.config.K
+        spatial_shape = agent.mu_q.shape[:-1] if agent.mu_q.ndim > 1 else ()
+
+        # Initialize with bare mass: Σ_p^{-1}
+        M = np.zeros(agent.Sigma_p.shape, dtype=np.float64)
+
+        # Bare mass (constant for quasi-static priors)
+        if agent.Sigma_p.ndim == 2:
+            # 0D: single Gaussian
+            M = np.linalg.inv(agent.Sigma_p + 1e-8 * np.eye(K))
+        elif agent.Sigma_p.ndim == 3:
+            # 1D field
+            for i in range(agent.Sigma_p.shape[0]):
+                M[i] = np.linalg.inv(agent.Sigma_p[i] + 1e-8 * np.eye(K))
+        else:
+            # 2D field
+            for i in range(agent.Sigma_p.shape[0]):
+                for j in range(agent.Sigma_p.shape[1]):
+                    M[i, j] = np.linalg.inv(agent.Sigma_p[i, j] + 1e-8 * np.eye(K))
+
+        # Add relational mass from belief consensus coupling
+        kappa_beta = getattr(self.system.config, 'kappa_beta', 1.0)
+        beta_fields = compute_softmax_weights(self.system, agent_idx, 'belief', kappa_beta)
+
+        for j_idx, beta_ij in beta_fields.items():
+            agent_j = self.system.agents[j_idx]
+
+            # Compute transport Ω_ij
+            Omega_ij = self.system.compute_transport_ij(agent_idx, j_idx)
+
+            # Add coupling: β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
+            if agent.mu_q.ndim == 1:
+                # 0D: scalar β, single matrix
+                Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q + 1e-8 * np.eye(K))
+                M += float(beta_ij) * (Omega_ij @ Sigma_q_j_inv @ Omega_ij.T)
+
+            elif agent.mu_q.ndim == 2:
+                # 1D field: β_ij(c), Ω_ij(c), Σ_q_j(c) all spatial
+                for i in range(agent.mu_q.shape[0]):
+                    Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i] + 1e-8 * np.eye(K))
+                    Omega_c = Omega_ij[i] if Omega_ij.ndim == 3 else Omega_ij
+                    M[i] += beta_ij[i] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+
+            else:
+                # 2D field
+                for i in range(agent.mu_q.shape[0]):
+                    for j in range(agent.mu_q.shape[1]):
+                        Sigma_q_j_inv = np.linalg.inv(agent_j.Sigma_q[i, j] + 1e-8 * np.eye(K))
+                        Omega_c = Omega_ij[i, j] if Omega_ij.ndim == 4 else Omega_ij
+                        M[i, j] += beta_ij[i, j] * (Omega_c @ Sigma_q_j_inv @ Omega_c.T)
+
+        return M.astype(np.float32)
+
     def _compute_velocity_hyperbolic(self, theta: np.ndarray, p: np.ndarray) -> np.ndarray:
         """
         Compute velocity dθ/dt with COMPLETE Hamilton's equations on product manifold.
 
-        For μ part (Euclidean with Fisher-Rao): dμ/dt = Σ_p π_μ
+        For μ part (COMPLETE Fisher-Rao): dμ/dt = M^{-1} π_μ
         For Σ part (Hyperbolic SPD): dΣ/dt = Σ Π_Σ Σ
 
-        CRITICAL: Mass ~ precision, so Fisher metric G = Σ^{-1}, velocity = G^{-1} π = Σ π
+        where M = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T includes:
+        - Bare mass: Σ_p^{-1} (prior precision)
+        - Relational mass: Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T (consensus coupling)
+
         The Σ equation is the geodesic flow on SPD(n) with affine-invariant metric,
         giving the manifold constant negative curvature κ = -1/4 (HYPERBOLIC!).
 
@@ -420,40 +495,45 @@ class HamiltonianTrainer:
             p: [π_μ, Π_Σ] momenta (flattened)
 
         Returns:
-            dtheta_dt: Velocity vector with complete Fisher-Rao + hyperbolic flow
+            dtheta_dt: Velocity vector with COMPLETE Fisher-Rao + hyperbolic flow
         """
         dtheta_dt = np.zeros_like(theta)
         idx_theta = 0
         idx_p = 0
 
-        for agent in self.system.agents:
+        for agent_idx, agent in enumerate(self.system.agents):
             K = agent.config.K
             n_spatial = agent.mu_q.size // K
             mu_size = n_spatial * K
             Sigma_size_per_point = K * (K + 1) // 2
 
-            # --- μ part (Euclidean with Fisher-Rao metric) ---
+            # --- μ part (COMPLETE Fisher-Rao metric with coupling) ---
             mu_flat = theta[idx_theta:idx_theta + mu_size]
             pi_mu = p[idx_p:idx_p + mu_size].reshape(agent.mu_q.shape)
 
-            # COMPLETE: dμ/dt = Σ_p π_μ (Fisher-Rao metric)
-            # Fisher information metric G = Σ^{-1}, so velocity = G^{-1} π = Σ π
+            # Compute COMPLETE mass matrix M = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
+            M = self._compute_complete_mass_matrix(agent, agent_idx)
+
+            # dμ/dt = M^{-1} π_μ (invert mass to get velocity)
             dmu_dt = np.zeros_like(pi_mu)
 
             if agent.mu_q.ndim == 1:
                 # 0D particle: single Gaussian
-                dmu_dt = agent.Sigma_p @ pi_mu / self.mass_scale
+                M_inv = np.linalg.inv(M + 1e-8 * np.eye(K))
+                dmu_dt = M_inv @ pi_mu / self.mass_scale
 
             elif agent.mu_q.ndim == 2:
-                # 1D field: apply Σ_p at each spatial point
+                # 1D field: invert M at each spatial point
                 for i in range(agent.mu_q.shape[0]):
-                    dmu_dt[i] = agent.Sigma_p[i] @ pi_mu[i] / self.mass_scale
+                    M_inv = np.linalg.inv(M[i] + 1e-8 * np.eye(K))
+                    dmu_dt[i] = M_inv @ pi_mu[i] / self.mass_scale
 
             else:
-                # 2D field: apply Σ_p at each spatial point
+                # 2D field: invert M at each spatial point
                 for i in range(agent.mu_q.shape[0]):
                     for j in range(agent.mu_q.shape[1]):
-                        dmu_dt[i, j] = agent.Sigma_p[i, j] @ pi_mu[i, j] / self.mass_scale
+                        M_inv = np.linalg.inv(M[i, j] + 1e-8 * np.eye(K))
+                        dmu_dt[i, j] = M_inv @ pi_mu[i, j] / self.mass_scale
 
             dtheta_dt[idx_theta:idx_theta + mu_size] = dmu_dt.flatten()
 
@@ -557,9 +637,12 @@ class HamiltonianTrainer:
             dΣ/dt = Σ Π Σ  (affine-invariant metric, κ = -1/4)
             dΠ/dt = -∂V/∂Σ
 
-        For μ parameters (Euclidean with Fisher-Rao metric):
-            dμ/dt = Σ_p π_μ  (mass ~ precision, G = Σ^{-1}, velocity = G^{-1} π = Σ π)
+        For μ parameters (COMPLETE Fisher-Rao with coupling):
+            dμ/dt = M^{-1} π_μ  where M = Σ_p^{-1} + Σ_j β_ij Ω_ij Σ_q_j^{-1} Ω_ij^T
             dπ/dt = -∂V/∂μ
+
+        Mass includes bare (Σ_p^{-1}) + relational (Σ_j β_ij...) components.
+        This provides natural damping through consensus coupling!
 
         If friction > 0, adds damping: dp/dt -= γ*p
 
@@ -568,7 +651,7 @@ class HamiltonianTrainer:
             p: Momentum [π_μ, Π_Σ] (flattened)
 
         Returns:
-            dtheta_dt: Velocity with Fisher-Rao (μ) + hyperbolic geodesic (Σ)
+            dtheta_dt: Velocity with COMPLETE Fisher-Rao (μ) + hyperbolic geodesic (Σ)
             dp_dt: Force -∇V with optional friction
         """
         # Compute velocity using hyperbolic geometry for Σ part
