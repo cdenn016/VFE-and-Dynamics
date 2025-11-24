@@ -606,8 +606,8 @@ class MultiScaleSystem:
         )
 
         # Initialize fields (same as Agent class would do)
-        agent._initialize_belief_cholesky()
-        agent._initialize_prior_cholesky()
+        agent._initialize_belief_covariance()
+        agent._initialize_prior_covariance()
         agent._initialize_gauge()
 
         self.agents[0].append(agent)
@@ -745,8 +745,8 @@ class MultiScaleSystem:
             meta_agent.support = self._compute_meta_support(constituents, coherence_scores)
             meta_agent.generators = constituents[0].generators
 
-            meta_agent._initialize_belief_cholesky()
-            meta_agent._initialize_prior_cholesky()
+            meta_agent._initialize_belief_covariance()
+            meta_agent._initialize_prior_covariance()
             meta_agent._initialize_gauge()
 
             

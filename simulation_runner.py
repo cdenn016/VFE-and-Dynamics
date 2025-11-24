@@ -187,8 +187,8 @@ def build_agents(manifold, supports, cfg: SimulationConfig, rng):
         agent.support = supports[i]
 
         # Re-initialize with support enforcement
-        agent._initialize_belief_cholesky()
-        agent._initialize_prior_cholesky()
+        agent._initialize_belief_covariance()
+        agent._initialize_prior_covariance()
         agent._initialize_gauge()
         agent.geometry.support = supports[i]
         agent.geometry.n_active = supports[i].n_active
