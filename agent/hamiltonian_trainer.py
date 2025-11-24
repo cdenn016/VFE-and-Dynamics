@@ -492,27 +492,60 @@ class HamiltonianTrainer:
 
     def _compute_force(self, theta: np.ndarray) -> np.ndarray:
         """
-        Compute force -∇V(θ).
+        Compute force -∇V(θ) using validated analytical gradients.
 
-        Uses finite differences to approximate gradient.
+        CRITICAL: Uses gradient_engine for exact, symplectic-preserving gradients.
+        Finite differences break energy conservation!
 
         Args:
             theta: Parameter vector
 
         Returns:
-            force: -∇V (d,)
+            force: -∇V (d,) in flattened Euclidean coordinates
         """
-        eps = 1e-5
+        from gradients.gradient_engine import compute_natural_gradients
+
+        # Unpack theta into agent parameters
+        theta_backup = self._pack_parameters()
+        self._unpack_parameters(theta)
+
+        # Compute analytical gradients (returns both Euclidean and natural)
+        agent_grads = compute_natural_gradients(self.system, n_jobs=1)
+
+        # Pack Euclidean gradients into flat vector
         grad_V = np.zeros_like(theta)
+        idx = 0
 
-        V0 = self._compute_potential(theta)
+        for agent, grads in zip(self.system.agents, agent_grads):
+            K = agent.config.K
+            n_spatial = agent.mu_q.size // K
 
-        for i in range(len(theta)):
-            theta_plus = theta.copy()
-            theta_plus[i] += eps
+            # --- μ gradients (Euclidean) ---
+            grad_mu_flat = grads.grad_mu_q.flatten()
+            mu_size = n_spatial * K
+            grad_V[idx:idx + mu_size] = grad_mu_flat
+            idx += mu_size
 
-            V_plus = self._compute_potential(theta_plus)
-            grad_V[i] = (V_plus - V0) / eps
+            # --- Σ gradients (Euclidean, upper triangle) ---
+            Sigma_size_per_point = K * (K + 1) // 2
+            grad_Sigma_reshaped = grads.grad_Sigma_q.reshape(-1, K, K)
+
+            for i in range(n_spatial):
+                Sigma_grad_mat = grad_Sigma_reshaped[i]
+                # Extract upper triangle (symmetrize: (∂S/∂Σ)_ij + (∂S/∂Σ)_ji for i≠j)
+                upper_indices = np.triu_indices(K)
+                grad_upper = Sigma_grad_mat[upper_indices]
+
+                # Symmetrize off-diagonal terms (gradient wrt symmetric matrix)
+                for k, (i_idx, j_idx) in enumerate(zip(*upper_indices)):
+                    if i_idx != j_idx:
+                        grad_upper[k] += Sigma_grad_mat[j_idx, i_idx]
+
+                grad_V[idx:idx + Sigma_size_per_point] = grad_upper
+                idx += Sigma_size_per_point
+
+        # Restore original parameters
+        self._unpack_parameters(theta_backup)
 
         return -grad_V
 
