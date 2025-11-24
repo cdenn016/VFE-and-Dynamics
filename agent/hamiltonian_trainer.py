@@ -408,10 +408,10 @@ class HamiltonianTrainer:
         """
         Compute velocity dθ/dt with COMPLETE Hamilton's equations on product manifold.
 
-        For μ part (Euclidean with Fisher-Rao): dμ/dt = Σ_p^{-1} π_μ
+        For μ part (Euclidean with Fisher-Rao): dμ/dt = Σ_p π_μ
         For Σ part (Hyperbolic SPD): dΣ/dt = Σ Π_Σ Σ
 
-        The μ equation uses the Fisher information metric (Σ_p^{-1}).
+        CRITICAL: Mass ~ precision, so Fisher metric G = Σ^{-1}, velocity = G^{-1} π = Σ π
         The Σ equation is the geodesic flow on SPD(n) with affine-invariant metric,
         giving the manifold constant negative curvature κ = -1/4 (HYPERBOLIC!).
 
@@ -436,36 +436,24 @@ class HamiltonianTrainer:
             mu_flat = theta[idx_theta:idx_theta + mu_size]
             pi_mu = p[idx_p:idx_p + mu_size].reshape(agent.mu_q.shape)
 
-            # COMPLETE: dμ/dt = Σ_p^{-1} π_μ (Fisher-Rao metric)
+            # COMPLETE: dμ/dt = Σ_p π_μ (Fisher-Rao metric)
+            # Fisher information metric G = Σ^{-1}, so velocity = G^{-1} π = Σ π
             dmu_dt = np.zeros_like(pi_mu)
 
             if agent.mu_q.ndim == 1:
                 # 0D particle: single Gaussian
-                try:
-                    Sigma_p_inv = np.linalg.inv(agent.Sigma_p + 1e-8 * np.eye(K))
-                    dmu_dt = Sigma_p_inv @ pi_mu / self.mass_scale
-                except np.linalg.LinAlgError:
-                    # Fallback if singular
-                    dmu_dt = pi_mu / self.mass_scale
+                dmu_dt = agent.Sigma_p @ pi_mu / self.mass_scale
 
             elif agent.mu_q.ndim == 2:
-                # 1D field: apply Σ_p^{-1} at each spatial point
+                # 1D field: apply Σ_p at each spatial point
                 for i in range(agent.mu_q.shape[0]):
-                    try:
-                        Sigma_p_inv = np.linalg.inv(agent.Sigma_p[i] + 1e-8 * np.eye(K))
-                        dmu_dt[i] = Sigma_p_inv @ pi_mu[i] / self.mass_scale
-                    except np.linalg.LinAlgError:
-                        dmu_dt[i] = pi_mu[i] / self.mass_scale
+                    dmu_dt[i] = agent.Sigma_p[i] @ pi_mu[i] / self.mass_scale
 
             else:
-                # 2D field: apply Σ_p^{-1} at each spatial point
+                # 2D field: apply Σ_p at each spatial point
                 for i in range(agent.mu_q.shape[0]):
                     for j in range(agent.mu_q.shape[1]):
-                        try:
-                            Sigma_p_inv = np.linalg.inv(agent.Sigma_p[i, j] + 1e-8 * np.eye(K))
-                            dmu_dt[i, j] = Sigma_p_inv @ pi_mu[i, j] / self.mass_scale
-                        except np.linalg.LinAlgError:
-                            dmu_dt[i, j] = pi_mu[i, j] / self.mass_scale
+                        dmu_dt[i, j] = agent.Sigma_p[i, j] @ pi_mu[i, j] / self.mass_scale
 
             dtheta_dt[idx_theta:idx_theta + mu_size] = dmu_dt.flatten()
 
@@ -537,7 +525,7 @@ class HamiltonianTrainer:
             dΠ/dt = -∂V/∂Σ
 
         For μ parameters (Euclidean with Fisher-Rao metric):
-            dμ/dt = Σ_p^{-1} π_μ  (Fisher information metric)
+            dμ/dt = Σ_p π_μ  (mass ~ precision, G = Σ^{-1}, velocity = G^{-1} π = Σ π)
             dπ/dt = -∂V/∂μ
 
         If friction > 0, adds damping: dp/dt -= γ*p
