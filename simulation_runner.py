@@ -28,12 +28,16 @@ from simulation_config import (
     default_config,
     emergence_demo_config,
     ouroboros_config,
-    flat_agents_config
+    flat_agents_config,
+    hamiltonian_config,
+    hamiltonian_emergence_config,
+    critical_damping_config
 )
 from config import AgentConfig, SystemConfig, TrainingConfig
 from agent.agents import Agent
 from agent.system import MultiAgentSystem
 from agent.trainer import Trainer, TrainingHistory
+from agent.hamiltonian_trainer import HamiltonianTrainer, HamiltonianHistory
 from geometry.geometry_base import BaseManifold, TopologyType
 from agent.masking import SupportRegionSmooth, SupportPatternsSmooth, MaskConfig
 
@@ -303,14 +307,28 @@ def _apply_identical_priors(system, system_cfg):
 
 def run_training(system, cfg: SimulationConfig, output_dir: Path):
     """
-    Unified training interface for both standard and hierarchical systems.
+    Unified training interface for all system/dynamics combinations.
 
-    Automatically detects system type and runs appropriate training.
+    Dispatches based on:
+    - enable_hamiltonian: Gradient flow vs Hamiltonian dynamics
+    - enable_emergence: Flat vs hierarchical system
+
+    Training modes:
+    1. Standard gradient flow (default)
+    2. Standard Hamiltonian (underdamped dynamics)
+    3. Hierarchical gradient flow (with emergence)
+    4. Hierarchical Hamiltonian (emergence + underdamped)
     """
-    if cfg.enable_emergence:
-        return _run_hierarchical_training(system, cfg, output_dir)
+    if cfg.enable_hamiltonian:
+        if cfg.enable_emergence:
+            return _run_hierarchical_hamiltonian_training(system, cfg, output_dir)
+        else:
+            return _run_hamiltonian_training(system, cfg, output_dir)
     else:
-        return _run_standard_training(system, cfg, output_dir)
+        if cfg.enable_emergence:
+            return _run_hierarchical_training(system, cfg, output_dir)
+        else:
+            return _run_standard_training(system, cfg, output_dir)
 
 
 def _run_standard_training(system, cfg, output_dir):
@@ -384,6 +402,114 @@ def _run_standard_training(system, cfg, output_dir):
     # Save history
     _save_history(history, output_dir)
     _plot_energy(history, output_dir)
+
+    # Save and visualize geometry if tracked
+    if geometry_tracker is not None:
+        print("\n  Saving pullback geometry data...")
+        geometry_tracker.save(output_dir / "geometry_history.pkl")
+        geometry_tracker.plot_evolution(output_dir / "geometry_evolution.png")
+
+        if cfg.geometry_enable_consensus:
+            geometry_tracker.plot_consensus_evolution(output_dir / "geometry_consensus.png")
+
+        from geometry.geometry_tracker import analyze_final_geometry
+        analyze_final_geometry(geometry_tracker.history, save_dir=output_dir / "geometry_analysis")
+
+    return history
+
+
+def _run_hamiltonian_training(system, cfg, output_dir):
+    """
+    Run Hamiltonian (underdamped) training for flat systems.
+
+    Uses symplectic integration to preserve phase space structure.
+    Energy is approximately conserved (bounded drift).
+
+    Dynamics regimes:
+    - friction=0: Conservative (pure Hamiltonian, underdamped)
+    - friction>0: Damped (approaches overdamped as friction increases)
+    """
+    print(f"\n{'='*70}")
+    print("HAMILTONIAN DYNAMICS TRAINING")
+    print(f"{'='*70}")
+    print(f"  Integrator: {cfg.hamiltonian_integrator}")
+    print(f"  Time step (dt): {cfg.hamiltonian_dt}")
+    print(f"  Friction (γ): {cfg.hamiltonian_friction}")
+    print(f"  Mass scale: {cfg.hamiltonian_mass_scale}")
+    regime = "Conservative (underdamped)" if cfg.hamiltonian_friction < 0.01 else "Damped"
+    print(f"  Regime: {regime}")
+
+    training_cfg = TrainingConfig(
+        n_steps=cfg.n_steps,
+        log_every=cfg.log_every,
+        lr_mu_q=cfg.lr_mu_q,
+        lr_sigma_q=cfg.lr_sigma_q,
+        lr_mu_p=cfg.lr_mu_p,
+        lr_sigma_p=cfg.lr_sigma_p,
+        lr_phi=cfg.lr_phi,
+        checkpoint_every=1,
+        checkpoint_dir=str(output_dir / "checkpoints"),
+    )
+
+    # Initialize Hamiltonian trainer
+    trainer = HamiltonianTrainer(
+        system,
+        config=training_cfg,
+        friction=cfg.hamiltonian_friction,
+        mass_scale=cfg.hamiltonian_mass_scale
+    )
+
+    # Initialize geometry tracker if enabled
+    geometry_tracker = None
+    if cfg.track_pullback_geometry:
+        from geometry.geometry_tracker import GeometryTracker
+
+        print("\n  Initializing Pullback Geometry Tracker...")
+        print(f"    Track interval: every {cfg.geometry_track_interval} steps")
+        print(f"    Consensus metrics: {'ENABLED' if cfg.geometry_enable_consensus else 'DISABLED'}")
+        print(f"    Gauge averaging: {'ENABLED' if cfg.geometry_enable_gauge_averaging else 'DISABLED'}")
+
+        # Compute dx from spatial shape
+        manifold = system.agents[0].base_manifold
+        if manifold.ndim > 0:
+            dx = 2 * np.pi / manifold.shape[0]  # Assuming periodic [0, 2π]
+        else:
+            dx = 1.0  # Point manifold
+
+        geometry_tracker = GeometryTracker(
+            agents=system.agents,
+            track_interval=cfg.geometry_track_interval,
+            dx=dx,
+            enable_consensus=cfg.geometry_enable_consensus,
+            enable_gauge_averaging=cfg.geometry_enable_gauge_averaging,
+            gauge_samples=cfg.geometry_gauge_samples,
+            lambda_obs=cfg.geometry_lambda_obs,
+            lambda_dark=cfg.geometry_lambda_dark
+        )
+
+    # Training loop with geometry tracking
+    if geometry_tracker is not None:
+        print("  Training with geometry tracking...")
+        # Record initial geometry
+        geometry_tracker.record(0, system.agents)
+
+        # Train with manual loop to inject geometry tracking
+        for step in range(cfg.n_steps):
+            # Single Hamiltonian step
+            trainer.step(dt=cfg.hamiltonian_dt)
+
+            # Record geometry
+            if geometry_tracker.should_record(step + 1):
+                geometry_tracker.record(step + 1, system.agents)
+
+        history = trainer.history
+    else:
+        # Standard Hamiltonian training without geometry tracking
+        history = trainer.train(n_steps=cfg.n_steps, dt=cfg.hamiltonian_dt)
+
+    # Save history
+    _save_history(history, output_dir)
+    _plot_hamiltonian_energy(history, output_dir)
 
     # Save and visualize geometry if tracked
     if geometry_tracker is not None:
@@ -624,6 +750,387 @@ def _run_hierarchical_training(system, cfg, output_dir):
     return history
 
 
+def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
+    """
+    Run Hamiltonian dynamics with hierarchical emergence.
+
+    This is the most sophisticated training mode, combining:
+    - Symplectic integration (energy-preserving)
+    - Multi-scale hierarchy (meta-agent emergence)
+    - Cross-scale prior propagation (Ouroboros tower)
+
+    Key insight: Each agent at each scale has its own phase space (θ, p).
+    The Hamiltonian includes coupling terms that preserve total energy
+    across the hierarchy.
+
+    EXPERIMENTAL: This mode is under active development.
+    """
+    from meta.hierarchical_evolution import HierarchicalEvolutionEngine, HierarchicalConfig
+    from meta.gradient_adapter import GradientSystemAdapter
+    from gradients.gradient_engine import compute_natural_gradients
+    from gradients.free_energy_clean import compute_total_free_energy
+
+    print(f"\n{'='*70}")
+    print("HIERARCHICAL HAMILTONIAN DYNAMICS")
+    print(f"{'='*70}")
+    print(f"  Integrator: {cfg.hamiltonian_integrator}")
+    print(f"  Time step (dt): {cfg.hamiltonian_dt}")
+    print(f"  Friction (γ): {cfg.hamiltonian_friction}")
+    print(f"  Mass scale: {cfg.hamiltonian_mass_scale}")
+    print(f"  Emergence: ENABLED")
+    print(f"  Ouroboros Tower: {'ENABLED' if cfg.enable_hyperprior_tower else 'DISABLED'}")
+    regime = "Conservative (underdamped)" if cfg.hamiltonian_friction < 0.01 else "Damped"
+    print(f"  Regime: {regime}")
+
+    hier_config = HierarchicalConfig(
+        enable_top_down_priors=cfg.enable_cross_scale_priors,
+        enable_hyperprior_tower=cfg.enable_hyperprior_tower,
+        max_hyperprior_depth=cfg.max_hyperprior_depth,
+        hyperprior_decay=cfg.hyperprior_decay,
+        enable_timescale_filtering=cfg.enable_timescale_sep,
+        consensus_check_interval=cfg.consensus_check_interval,
+        consensus_kl_threshold=cfg.consensus_threshold,
+        min_cluster_size=cfg.min_cluster_size,
+        lr_mu_q=cfg.lr_mu_q,
+        lr_sigma_q=cfg.lr_sigma_q,
+        lr_mu_p=cfg.lr_mu_p,
+        lr_sigma_p=cfg.lr_sigma_p,
+        lr_phi=cfg.lr_phi
+    )
+
+    engine = HierarchicalEvolutionEngine(system, hier_config)
+
+    # Initialize phase space for all agents (θ, p)
+    # Each agent gets its own momentum initialized to zero
+    # NOTE: For simplicity, we only track mu dynamics (not full Sigma dynamics)
+    agent_momenta = {}  # Dict[scale][agent_id] -> momentum array
+    for scale, agents in system.agents.items():
+        agent_momenta[scale] = {}
+        for agent in agents:
+            # Initialize momentum to zero (start from rest)
+            # Only track mu_q dynamics for simplified hierarchical Hamiltonian
+            theta_size = agent.mu_q.size
+            agent_momenta[scale][agent.agent_id] = np.zeros(theta_size)
+
+    # Initialize geometry tracker if enabled
+    geometry_tracker = None
+    if cfg.track_pullback_geometry:
+        from geometry.geometry_tracker import GeometryTracker
+
+        print("\n  Initializing Pullback Geometry Tracker...")
+        base_agents = system.agents[0]  # Scale 0 agents
+
+        if len(base_agents) > 0:
+            manifold = base_agents[0].base_manifold
+            if manifold.ndim > 0:
+                dx = 2 * np.pi / manifold.shape[0]
+            else:
+                dx = 1.0
+        else:
+            dx = 1.0
+
+        geometry_tracker = GeometryTracker(
+            agents=base_agents,
+            track_interval=cfg.geometry_track_interval,
+            dx=dx,
+            enable_consensus=cfg.geometry_enable_consensus,
+            enable_gauge_averaging=cfg.geometry_enable_gauge_averaging,
+            gauge_samples=cfg.geometry_gauge_samples,
+            lambda_obs=cfg.geometry_lambda_obs,
+            lambda_dark=cfg.geometry_lambda_dark
+        )
+        geometry_tracker.record(0, base_agents)
+
+    # Initialize visualizers
+    analyzer = None
+    diagnostics = None
+    if cfg.generate_meta_visualizations:
+        from meta.visualization import MetaAgentAnalyzer
+        from meta.participatory_diagnostics import ParticipatoryDiagnostics
+
+        print("  Initializing comprehensive visualization tools...")
+        analyzer = MetaAgentAnalyzer(system)
+        diagnostics = ParticipatoryDiagnostics(
+            system=system,
+            track_agent_ids=None,
+            compute_full_energies=True
+        )
+
+    # History tracking (extended for Hamiltonian)
+    history = {
+        'step': [],
+        'total': [],
+        'kinetic_energy': [],
+        'potential_energy': [],
+        'total_hamiltonian': [],
+        'energy_drift': [],
+        'n_scales': [],
+        'n_active_agents': [],
+        'n_condensations': [],
+        'emergence_events': []
+    }
+
+    dt = cfg.hamiltonian_dt
+    friction = cfg.hamiltonian_friction
+    mass_scale = cfg.hamiltonian_mass_scale
+    initial_H = None
+
+    # Training loop
+    for step in range(cfg.n_steps):
+        active_agents = system.get_all_active_agents()
+        if not active_agents:
+            break
+
+        # Create adapter for energy/gradient computation
+        adapter = GradientSystemAdapter(active_agents, system.system_config)
+
+        # Compute energy (potential V)
+        energies = compute_total_free_energy(adapter)
+        V = energies.total
+
+        # Compute gradients (force = -∇V)
+        agent_grads = compute_natural_gradients(adapter)
+
+        # Leapfrog integration for each agent across all scales
+        total_kinetic = 0.0
+
+        for agent, grads in zip(active_agents, agent_grads):
+            scale = agent.scale if hasattr(agent, 'scale') else 0
+            aid = agent.agent_id
+            K = agent.config.K
+
+            # Ensure momentum exists for this agent
+            if scale not in agent_momenta:
+                agent_momenta[scale] = {}
+            if aid not in agent_momenta[scale]:
+                theta_size = agent.mu_q.size
+                agent_momenta[scale][aid] = np.zeros(theta_size)
+
+            p = agent_momenta[scale][aid]
+
+            # Get gradient for mu_q (full gradient, same shape as mu_q)
+            grad_mu = grads.grad_mu_q.flatten()
+
+            # Half-step momentum update: p = p - (dt/2) * ∇V
+            p = p - 0.5 * dt * grad_mu
+
+            # Full-step position update: μ = μ + dt * M^{-1} * p
+            # Use prior covariance as inverse mass (Σ_p ≈ M^{-1})
+            # For 0D agent: Sigma_p is (K, K), mu is (K,)
+            # For 1D agent: Sigma_p is (N, K, K), mu is (N, K)
+            # For 2D agent: Sigma_p is (H, W, K, K), mu is (H, W, K)
+
+            if agent.mu_q.ndim == 1:
+                # 0D: Single Gaussian, Sigma_p is (K, K)
+                M_inv = agent.Sigma_p  # Sigma_p as inverse mass
+                velocity = (M_inv @ p) / mass_scale
+            elif agent.mu_q.ndim == 2:
+                # 1D field: Apply M^{-1} per spatial point
+                n_spatial = agent.mu_q.shape[0]
+                velocity = np.zeros_like(p)
+                p_reshaped = p.reshape(n_spatial, K)
+                for i in range(n_spatial):
+                    M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
+                    velocity[i*K:(i+1)*K] = (M_inv_i @ p_reshaped[i]) / mass_scale
+            else:
+                # 2D+ field: Simplified - use identity
+                velocity = p / mass_scale
+
+            agent.mu_q = agent.mu_q + dt * velocity.reshape(agent.mu_q.shape)
+
+            # Recompute gradient after position update
+            adapter_new = GradientSystemAdapter(active_agents, system.system_config)
+            agent_grads_new = compute_natural_gradients(adapter_new)
+
+            # Find updated gradient for this agent
+            grad_mu_new = grad_mu  # Default to old
+            for a, g in zip(active_agents, agent_grads_new):
+                if a.agent_id == aid:
+                    grad_mu_new = g.grad_mu_q.flatten()
+                    break
+
+            # Half-step momentum update: p = p - (dt/2) * ∇V_new
+            p = p - 0.5 * dt * grad_mu_new
+
+            # Apply friction if specified
+            if friction > 0:
+                p = p * np.exp(-friction * dt)
+
+            # Store updated momentum
+            agent_momenta[scale][aid] = p
+
+            # Accumulate kinetic energy: T = (1/2) p^T M^{-1} p
+            if agent.mu_q.ndim == 1:
+                # 0D: T = (1/2) p^T Σ_p p
+                T_agent = 0.5 * np.dot(p, agent.Sigma_p @ p) / mass_scale
+            elif agent.mu_q.ndim == 2:
+                # 1D: Sum over spatial points
+                n_spatial = agent.mu_q.shape[0]
+                p_reshaped = p.reshape(n_spatial, K)
+                T_agent = 0.0
+                for i in range(n_spatial):
+                    M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
+                    T_agent += 0.5 * np.dot(p_reshaped[i], M_inv_i @ p_reshaped[i]) / mass_scale
+            else:
+                # 2D+: Simplified
+                T_agent = 0.5 * np.dot(p, p) / mass_scale
+            total_kinetic += T_agent
+
+        # Total Hamiltonian
+        H = total_kinetic + V
+
+        if initial_H is None:
+            initial_H = H
+
+        energy_drift = abs(H - initial_H) / (abs(initial_H) + 1e-10)
+
+        # Check for consensus and form meta-agents
+        metrics = engine._check_consensus_and_condense(step)
+
+        # Update priors from parents (top-down)
+        if hier_config.enable_top_down_priors:
+            engine._update_priors_from_parents()
+
+        # Record geometry if tracking enabled
+        if geometry_tracker is not None and geometry_tracker.should_record(step + 1):
+            base_agents = system.agents[0]
+            geometry_tracker.record(step + 1, base_agents)
+
+        # Capture visualization snapshots
+        if cfg.generate_meta_visualizations:
+            if step % cfg.snapshot_interval == 0 or step == cfg.n_steps - 1:
+                analyzer.capture_snapshot()
+            diagnostics.record_snapshot(step)
+
+        # Record metrics
+        actual_n_scales = len(system.agents)
+        actual_n_active = sum(sum(1 for a in agents if a.is_active)
+                             for agents in system.agents.values())
+
+        history['step'].append(step)
+        history['total'].append(energies.total)
+        history['kinetic_energy'].append(total_kinetic)
+        history['potential_energy'].append(V)
+        history['total_hamiltonian'].append(H)
+        history['energy_drift'].append(energy_drift)
+        history['n_scales'].append(actual_n_scales)
+        history['n_active_agents'].append(actual_n_active)
+        history['n_condensations'].append(metrics.get('n_condensations', 0))
+
+        # Check early stopping
+        stop_reason = None
+        if cfg.stop_if_n_scales_reached and actual_n_scales >= cfg.stop_if_n_scales_reached:
+            stop_reason = f"Reached target scale count: {actual_n_scales}/{cfg.stop_if_n_scales_reached}"
+        elif cfg.stop_if_max_active_agents and actual_n_active >= cfg.stop_if_max_active_agents:
+            stop_reason = f"Reached maximum active agents: {actual_n_active}/{cfg.stop_if_max_active_agents}"
+
+        if stop_reason:
+            print(f"\n  Early stop at step {step}: {stop_reason}")
+            break
+
+        # Log emergence events
+        if metrics.get('n_condensations', 0) > 0:
+            event = {
+                'step': step,
+                'n_condensations': metrics['n_condensations'],
+                'n_scales': actual_n_scales
+            }
+            history['emergence_events'].append(event)
+            print(f"\n  EMERGENCE at step {step}! {metrics['n_condensations']} new meta-agents")
+
+        if step % cfg.log_every == 0:
+            print(f"Step {step:4d} | H: {H:.4f} [T={total_kinetic:.3f}, V={V:.3f}] | "
+                  f"drift={energy_drift:.2e} | Scales: {actual_n_scales} | Active: {actual_n_active}")
+
+    # Save history
+    _save_history(history, output_dir)
+    _plot_hierarchical_hamiltonian(history, output_dir)
+
+    # Save geometry
+    if geometry_tracker is not None:
+        print("\n  Saving pullback geometry data...")
+        geometry_tracker.save(output_dir / "geometry_history.pkl")
+        geometry_tracker.plot_evolution(output_dir / "geometry_evolution.png")
+
+        if cfg.geometry_enable_consensus:
+            geometry_tracker.plot_consensus_evolution(output_dir / "geometry_consensus.png")
+
+        from geometry.geometry_tracker import analyze_final_geometry
+        analyze_final_geometry(geometry_tracker.history, save_dir=output_dir / "geometry_analysis")
+
+    # Generate visualizations
+    if cfg.generate_meta_visualizations and analyzer and diagnostics:
+        _generate_comprehensive_visualizations(system, analyzer, diagnostics, output_dir)
+    else:
+        _plot_emergence(history, output_dir)
+
+    return history
+
+
+def _plot_hierarchical_hamiltonian(history, output_dir):
+    """
+    Plot Hamiltonian + emergence evolution.
+
+    Creates a 2x2 figure showing:
+    - Hamiltonian components (T, V, H)
+    - Energy drift
+    - Hierarchy growth
+    - Emergence events
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    steps = history['step']
+
+    # 1. Hamiltonian components
+    ax1 = axes[0, 0]
+    ax1.plot(steps, history['total_hamiltonian'], 'k-', linewidth=2, label='H = T + V')
+    ax1.plot(steps, history['kinetic_energy'], 'b--', linewidth=1.5, label='T (kinetic)')
+    ax1.plot(steps, history['potential_energy'], 'r--', linewidth=1.5, label='V (potential)')
+    ax1.set_xlabel('Step')
+    ax1.set_ylabel('Energy')
+    ax1.set_title('Hamiltonian Components')
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    # 2. Energy drift
+    ax2 = axes[0, 1]
+    ax2.semilogy(steps, np.array(history['energy_drift']) + 1e-12, 'g-', linewidth=2)
+    ax2.axhline(y=0.01, color='orange', linestyle='--', alpha=0.7, label='1% threshold')
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('|H(t) - H(0)|/H(0)')
+    ax2.set_title('Energy Conservation')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+
+    # 3. Hierarchy evolution
+    ax3 = axes[1, 0]
+    ax3.plot(steps, history['n_scales'], 'g-', marker='o', markersize=3, label='# Scales')
+    ax3.plot(steps, history['n_active_agents'], 'b-', marker='s', markersize=3, label='# Active Agents')
+    ax3.set_xlabel('Step')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Hierarchical Structure')
+    ax3.legend()
+    ax3.grid(alpha=0.3)
+
+    # 4. Energy with emergence markers
+    ax4 = axes[1, 1]
+    ax4.plot(steps, history['total'], 'b-', linewidth=2, label='Free Energy')
+    for event in history['emergence_events']:
+        ax4.axvline(event['step'], color='red', alpha=0.3, linestyle='--')
+    ax4.set_xlabel('Step')
+    ax4.set_ylabel('Free Energy')
+    ax4.set_title('Free Energy (red = emergence)')
+    ax4.legend()
+    ax4.grid(alpha=0.3)
+
+    plt.tight_layout()
+
+    fig_path = output_dir / "hierarchical_hamiltonian_evolution.png"
+    plt.savefig(fig_path, dpi=150)
+    plt.close()
+    print(f"✓ Saved {fig_path}")
+
+
 # =============================================================================
 # Saving and Visualization
 # =============================================================================
@@ -648,6 +1155,89 @@ def _plot_energy(history, output_dir):
     plt.xlabel('Step')
     plt.ylabel('Energy')
     plt.title('Energy Evolution')
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    fig_path = output_dir / "energy_evolution.png"
+    plt.savefig(fig_path, dpi=150)
+    plt.close()
+    print(f"✓ Saved {fig_path}")
+
+
+def _plot_hamiltonian_energy(history, output_dir):
+    """
+    Plot Hamiltonian energy evolution with phase space diagnostics.
+
+    Creates a 2x2 figure showing:
+    - Total Hamiltonian H = T + V
+    - Kinetic (T) and Potential (V) separately
+    - Energy drift |H(t) - H(0)|/H(0)
+    - Phase space norms (momentum & velocity)
+    """
+    if not isinstance(history, HamiltonianHistory):
+        # Fallback to standard plot
+        _plot_energy(history, output_dir)
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    steps = history.steps
+
+    # 1. Total Hamiltonian
+    ax1 = axes[0, 0]
+    ax1.plot(steps, history.total_hamiltonian, 'k-', linewidth=2, label='H = T + V')
+    ax1.set_xlabel('Step')
+    ax1.set_ylabel('Hamiltonian')
+    ax1.set_title('Total Hamiltonian (should be conserved)')
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    # 2. Kinetic and Potential energy
+    ax2 = axes[0, 1]
+    ax2.plot(steps, history.kinetic_energy, 'b-', linewidth=2, label='T (kinetic)')
+    ax2.plot(steps, history.potential_energy, 'r-', linewidth=2, label='V (potential)')
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel('Energy')
+    ax2.set_title('Energy Components')
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+
+    # 3. Energy drift
+    ax3 = axes[1, 0]
+    ax3.semilogy(steps, np.array(history.energy_drift) + 1e-12, 'g-', linewidth=2)
+    ax3.axhline(y=0.01, color='orange', linestyle='--', alpha=0.7, label='1% threshold')
+    ax3.axhline(y=0.001, color='red', linestyle='--', alpha=0.7, label='0.1% threshold')
+    ax3.set_xlabel('Step')
+    ax3.set_ylabel('|H(t) - H(0)|/H(0)')
+    ax3.set_title('Energy Drift (symplectic should stay bounded)')
+    ax3.legend()
+    ax3.grid(alpha=0.3)
+
+    # 4. Phase space norms
+    ax4 = axes[1, 1]
+    ax4.plot(steps, history.momentum_norms, 'purple', linewidth=2, label='||p|| (momentum)')
+    ax4.plot(steps, history.velocity_norms, 'orange', linewidth=2, label='||θ̇|| (velocity)')
+    ax4.set_xlabel('Step')
+    ax4.set_ylabel('Norm')
+    ax4.set_title('Phase Space Dynamics')
+    ax4.legend()
+    ax4.grid(alpha=0.3)
+
+    plt.tight_layout()
+
+    fig_path = output_dir / "hamiltonian_evolution.png"
+    plt.savefig(fig_path, dpi=150)
+    plt.close()
+    print(f"✓ Saved {fig_path}")
+
+    # Also save standard energy plot for comparison
+    plt.figure(figsize=(10, 6))
+    plt.plot(steps, history.total_energy, 'b-', linewidth=2, label='Free Energy F')
+    plt.plot(steps, history.total_hamiltonian, 'k--', linewidth=2, label='Hamiltonian H')
+    plt.xlabel('Step')
+    plt.ylabel('Energy')
+    plt.title('Free Energy vs Hamiltonian')
+    plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
 
@@ -781,7 +1371,8 @@ def _generate_comprehensive_visualizations(system, analyzer, diagnostics, output
 def main():
     parser = argparse.ArgumentParser(description="Streamlined Simulation Runner")
     parser.add_argument('--preset', type=str, default='default',
-                       choices=['default', 'emergence', 'ouroboros', 'flat'],
+                       choices=['default', 'emergence', 'ouroboros', 'flat',
+                               'hamiltonian', 'hamiltonian_emergence', 'critical_damping'],
                        help='Configuration preset')
     args = parser.parse_args()
 
@@ -790,7 +1381,10 @@ def main():
         'default': default_config,
         'emergence': emergence_demo_config,
         'ouroboros': ouroboros_config,
-        'flat': flat_agents_config
+        'flat': flat_agents_config,
+        'hamiltonian': hamiltonian_config,
+        'hamiltonian_emergence': hamiltonian_emergence_config,
+        'critical_damping': critical_damping_config
     }
     cfg = preset_map[args.preset]()
 

@@ -153,6 +153,15 @@ class SimulationConfig:
     snapshot_interval: int             =   1  # Capture analyzer snapshots every N steps
 
     # =============================================================================
+    # Hamiltonian Dynamics (Alternative to Gradient Flow)
+    # =============================================================================
+    enable_hamiltonian: bool = False  # Enable Hamiltonian (underdamped) dynamics
+    hamiltonian_integrator: str = "Verlet"  # SymplecticEuler, Verlet, Ruth3, PEFRL
+    hamiltonian_dt: float = 0.01  # Time step for symplectic integration
+    hamiltonian_friction: float = 0.0  # Damping coefficient γ (0 = conservative)
+    hamiltonian_mass_scale: float = 1.0  # Mass scale for kinetic term
+
+    # =============================================================================
     # Pullback Geometry Tracking (Emergent Spacetime)
     # =============================================================================
     track_pullback_geometry: bool = True  # Enable pullback metric tracking
@@ -179,12 +188,20 @@ class SimulationConfig:
 
 
     def __post_init__(self):
-        """Compute derived parameters."""
+        """Compute derived parameters and validate settings."""
         # Compute gaussian_sigma from overlap_threshold
         if self.overlap_threshold > 0:
             self.gaussian_sigma = 1.0 / np.sqrt(-2 * np.log(self.overlap_threshold))
         else:
             self.gaussian_sigma = 1.0
+
+        # Validate Hamiltonian integrator
+        valid_integrators = {"SymplecticEuler", "Verlet", "StormerVerlet", "Ruth3", "PEFRL"}
+        if self.hamiltonian_integrator not in valid_integrators:
+            raise ValueError(
+                f"Invalid hamiltonian_integrator '{self.hamiltonian_integrator}'. "
+                f"Valid options: {valid_integrators}"
+            )
 
     def to_dict(self) -> dict:
         """Convert config to dictionary for serialization."""
@@ -221,6 +238,8 @@ class SimulationConfig:
                                "obs_r_scale", "obs_ground_truth_amplitude", "obs_ground_truth_modes"],
                 "Diagnostics": ["run_initial_diagnostics", "run_final_diagnostics",
                               "save_diagnostic_plots", "save_diagnostic_report"],
+                "Hamiltonian": ["enable_hamiltonian", "hamiltonian_integrator",
+                               "hamiltonian_dt", "hamiltonian_friction", "hamiltonian_mass_scale"],
                 "Geometry": ["track_pullback_geometry", "geometry_track_interval",
                            "geometry_enable_consensus", "geometry_enable_gauge_averaging",
                            "geometry_gauge_samples", "geometry_lambda_obs", "geometry_lambda_dark"],
@@ -355,4 +374,145 @@ def flat_agents_config() -> SimulationConfig:
         enable_emergence=False,
         n_agents=5,
         n_steps=50,
+    )
+
+
+def hamiltonian_config() -> SimulationConfig:
+    """
+    Configuration for Hamiltonian (underdamped) dynamics.
+
+    Uses symplectic integration to preserve phase space structure.
+    Energy is approximately conserved (bounded drift).
+
+    Key parameters:
+    - hamiltonian_dt: Time step for integration (smaller = more accurate)
+    - hamiltonian_friction: Damping coefficient (0 = conservative)
+    - hamiltonian_mass_scale: Mass scaling for kinetic term
+
+    Dynamics regimes:
+    - friction=0: Pure Hamiltonian (underdamped, energy-conserving)
+    - friction=0.1: Light damping (approaches equilibrium slowly)
+    - friction=1.0: Critical damping (fastest convergence)
+    - friction=10.0: Heavy damping (approaches gradient flow)
+    """
+    return SimulationConfig(
+        experiment_name="_hamiltonian",
+        experiment_description="Hamiltonian dynamics with symplectic integration",
+
+        # Enable Hamiltonian dynamics
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",  # Best balance of accuracy/speed
+        hamiltonian_dt=0.01,  # Conservative time step
+        hamiltonian_friction=0.0,  # Pure Hamiltonian (conservative)
+        hamiltonian_mass_scale=1.0,
+
+        # Standard agents
+        n_agents=5,
+        K_latent=3,
+        n_steps=200,
+        log_every=10,
+
+        # Disable emergence for flat Hamiltonian
+        enable_emergence=False,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=1.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
+
+
+def hamiltonian_emergence_config() -> SimulationConfig:
+    """
+    Configuration for Hamiltonian dynamics WITH emergence.
+
+    Combines:
+    - Symplectic integration (energy-preserving dynamics)
+    - Meta-agent emergence (hierarchical structure formation)
+    - Ouroboros tower (cross-scale prior propagation)
+
+    This is the most sophisticated training mode, enabling study of
+    how energy conservation interacts with emergence phenomena.
+    """
+    return SimulationConfig(
+        experiment_name="_hamiltonian_emergence",
+        experiment_description="Hamiltonian dynamics with hierarchical emergence",
+
+        # Enable Hamiltonian dynamics
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=0.1,  # Light damping for stability
+        hamiltonian_mass_scale=1.0,
+
+        # Enable emergence
+        enable_emergence=True,
+        consensus_threshold=0.05,
+        consensus_check_interval=5,
+        min_cluster_size=2,
+        max_scale=10,
+
+        # Ouroboros Tower
+        enable_cross_scale_priors=True,
+        enable_hyperprior_tower=True,
+        max_hyperprior_depth=3,
+        hyperprior_decay=0.5,
+
+        # Agents
+        n_agents=8,
+        K_latent=3,
+        n_steps=300,
+        log_every=10,
+
+        # Balanced energy landscape
+        lambda_self=1.0,
+        lambda_belief_align=1.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+
+        # Visualization
+        generate_meta_visualizations=True,
+        snapshot_interval=5,
+    )
+
+
+def critical_damping_config() -> SimulationConfig:
+    """
+    Configuration for critically damped dynamics.
+
+    Critical damping provides fastest convergence without oscillation.
+    Intermediate between pure Hamiltonian and gradient flow.
+
+    Good for:
+    - Faster equilibration than gradient flow
+    - More stability than pure Hamiltonian
+    - Studying transition between dynamics regimes
+    """
+    return SimulationConfig(
+        experiment_name="_critical_damping",
+        experiment_description="Critically damped Hamiltonian dynamics",
+
+        # Hamiltonian with critical friction
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=1.0,  # Critical damping regime
+        hamiltonian_mass_scale=1.0,
+
+        # Standard setup
+        n_agents=5,
+        K_latent=3,
+        n_steps=100,
+        log_every=5,
+        enable_emergence=False,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=1.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
     )
