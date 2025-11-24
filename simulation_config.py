@@ -160,6 +160,7 @@ class SimulationConfig:
     hamiltonian_dt: float = 0.01  # Time step for symplectic integration
     hamiltonian_friction: float = 0.0  # Damping coefficient γ (0 = conservative)
     hamiltonian_mass_scale: float = 1.0  # Mass scale for kinetic term
+    hamiltonian_include_gauge: bool = True  # Include gauge field φ in phase space (full field theory)
 
     # =============================================================================
     # Pullback Geometry Tracking (Emergent Spacetime)
