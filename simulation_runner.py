@@ -984,12 +984,19 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
 
         energy_drift = abs(H - initial_H) / (abs(initial_H) + 1e-10)
 
-        # Check for consensus and form meta-agents
-        metrics = engine._check_consensus_and_condense(step)
+        # Check for consensus and form meta-agents (periodically)
+        metrics = {'n_condensations': 0}
+        if step % hier_config.consensus_check_interval == 0:
+            new_condensations = engine._check_and_condense_all_scales()
+            metrics['n_condensations'] = len(new_condensations)
 
-        # Update priors from parents (top-down)
+        # Update priors from parents (top-down) via system method
         if hier_config.enable_top_down_priors:
-            engine._update_priors_from_parents()
+            system.update_cross_scale_priors(
+                enable_tower=hier_config.enable_hyperprior_tower,
+                max_depth=hier_config.max_hyperprior_depth,
+                decay=hier_config.hyperprior_decay
+            )
 
         # Record geometry if tracking enabled
         if geometry_tracker is not None and geometry_tracker.should_record(step + 1):
