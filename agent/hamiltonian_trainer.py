@@ -406,11 +406,12 @@ class HamiltonianTrainer:
 
     def _compute_velocity_hyperbolic(self, theta: np.ndarray, p: np.ndarray) -> np.ndarray:
         """
-        Compute velocity dθ/dt with HYPERBOLIC geodesic flow for Σ parameters.
+        Compute velocity dθ/dt with COMPLETE Hamilton's equations on product manifold.
 
-        For μ part (Euclidean): dμ/dt = Σ_p^{-1} π_μ
+        For μ part (Euclidean with Fisher-Rao): dμ/dt = Σ_p^{-1} π_μ
         For Σ part (Hyperbolic SPD): dΣ/dt = Σ Π_Σ Σ
 
+        The μ equation uses the Fisher information metric (Σ_p^{-1}).
         The Σ equation is the geodesic flow on SPD(n) with affine-invariant metric,
         giving the manifold constant negative curvature κ = -1/4 (HYPERBOLIC!).
 
@@ -419,7 +420,7 @@ class HamiltonianTrainer:
             p: [π_μ, Π_Σ] momenta (flattened)
 
         Returns:
-            dtheta_dt: Velocity vector with proper hyperbolic flow
+            dtheta_dt: Velocity vector with complete Fisher-Rao + hyperbolic flow
         """
         dtheta_dt = np.zeros_like(theta)
         idx_theta = 0
@@ -431,13 +432,42 @@ class HamiltonianTrainer:
             mu_size = n_spatial * K
             Sigma_size_per_point = K * (K + 1) // 2
 
-            # --- μ part (Euclidean) ---
+            # --- μ part (Euclidean with Fisher-Rao metric) ---
             mu_flat = theta[idx_theta:idx_theta + mu_size]
-            pi_mu = p[idx_p:idx_p + mu_size]
+            pi_mu = p[idx_p:idx_p + mu_size].reshape(agent.mu_q.shape)
 
-            # dμ/dt = Σ_p^{-1} π (but simplified as identity for now)
-            dmu_dt = pi_mu / self.mass_scale
-            dtheta_dt[idx_theta:idx_theta + mu_size] = dmu_dt
+            # COMPLETE: dμ/dt = Σ_p^{-1} π_μ (Fisher-Rao metric)
+            dmu_dt = np.zeros_like(pi_mu)
+
+            if agent.mu_q.ndim == 1:
+                # 0D particle: single Gaussian
+                try:
+                    Sigma_p_inv = np.linalg.inv(agent.Sigma_p + 1e-8 * np.eye(K))
+                    dmu_dt = Sigma_p_inv @ pi_mu / self.mass_scale
+                except np.linalg.LinAlgError:
+                    # Fallback if singular
+                    dmu_dt = pi_mu / self.mass_scale
+
+            elif agent.mu_q.ndim == 2:
+                # 1D field: apply Σ_p^{-1} at each spatial point
+                for i in range(agent.mu_q.shape[0]):
+                    try:
+                        Sigma_p_inv = np.linalg.inv(agent.Sigma_p[i] + 1e-8 * np.eye(K))
+                        dmu_dt[i] = Sigma_p_inv @ pi_mu[i] / self.mass_scale
+                    except np.linalg.LinAlgError:
+                        dmu_dt[i] = pi_mu[i] / self.mass_scale
+
+            else:
+                # 2D field: apply Σ_p^{-1} at each spatial point
+                for i in range(agent.mu_q.shape[0]):
+                    for j in range(agent.mu_q.shape[1]):
+                        try:
+                            Sigma_p_inv = np.linalg.inv(agent.Sigma_p[i, j] + 1e-8 * np.eye(K))
+                            dmu_dt[i, j] = Sigma_p_inv @ pi_mu[i, j] / self.mass_scale
+                        except np.linalg.LinAlgError:
+                            dmu_dt[i, j] = pi_mu[i, j] / self.mass_scale
+
+            dtheta_dt[idx_theta:idx_theta + mu_size] = dmu_dt.flatten()
 
             idx_theta += mu_size
             idx_p += mu_size
@@ -500,14 +530,14 @@ class HamiltonianTrainer:
 
     def _hamiltonian_equations(self, theta: np.ndarray, p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute Hamilton's equations of motion ON HYPERBOLIC SPD MANIFOLD.
+        Compute COMPLETE Hamilton's equations on product manifold ℝ^K × SPD(n).
 
         CRITICAL: For Σ parameters, uses geodesic flow on SPD(n):
             dΣ/dt = Σ Π Σ  (affine-invariant metric, κ = -1/4)
             dΠ/dt = -∂V/∂Σ
 
-        For μ parameters (Euclidean):
-            dμ/dt = Σ_p π_μ
+        For μ parameters (Euclidean with Fisher-Rao metric):
+            dμ/dt = Σ_p^{-1} π_μ  (Fisher information metric)
             dπ/dt = -∂V/∂μ
 
         If friction > 0, adds damping: dp/dt -= γ*p
@@ -517,7 +547,7 @@ class HamiltonianTrainer:
             p: Momentum [π_μ, Π_Σ] (flattened)
 
         Returns:
-            dtheta_dt: Velocity with HYPERBOLIC geodesic flow for Σ
+            dtheta_dt: Velocity with Fisher-Rao (μ) + hyperbolic geodesic (Σ)
             dp_dt: Force -∇V with optional friction
         """
         # Compute velocity using hyperbolic geometry for Σ part
