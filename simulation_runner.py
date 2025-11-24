@@ -802,12 +802,14 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
 
     # Initialize phase space for all agents (θ, p)
     # Each agent gets its own momentum initialized to zero
+    # NOTE: For simplicity, we only track mu dynamics (not full Sigma dynamics)
     agent_momenta = {}  # Dict[scale][agent_id] -> momentum array
     for scale, agents in system.agents.items():
         agent_momenta[scale] = {}
         for agent in agents:
             # Initialize momentum to zero (start from rest)
-            theta_size = agent.mu_q.size + agent.Sigma_q.size  # Simplified
+            # Only track mu_q dynamics for simplified hierarchical Hamiltonian
+            theta_size = agent.mu_q.size
             agent_momenta[scale][agent.agent_id] = np.zeros(theta_size)
 
     # Initialize geometry tracker if enabled
@@ -895,6 +897,7 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
         for agent, grads in zip(active_agents, agent_grads):
             scale = agent.scale if hasattr(agent, 'scale') else 0
             aid = agent.agent_id
+            K = agent.config.K
 
             # Ensure momentum exists for this agent
             if scale not in agent_momenta:
@@ -905,21 +908,34 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
 
             p = agent_momenta[scale][aid]
 
-            # Get gradient for mu_q (simplified: focus on mean dynamics)
-            grad_mu = grads.grad_mu_q.flatten()[:len(p)]
+            # Get gradient for mu_q (full gradient, same shape as mu_q)
+            grad_mu = grads.grad_mu_q.flatten()
 
             # Half-step momentum update: p = p - (dt/2) * ∇V
             p = p - 0.5 * dt * grad_mu
 
             # Full-step position update: μ = μ + dt * M^{-1} * p
-            # Use prior precision as mass (simplified Fisher metric)
-            if agent.Sigma_p.ndim == 2:
-                M_inv = agent.Sigma_p  # Sigma_p as inverse mass
-            else:
-                M_inv = np.eye(agent.config.K)  # Fallback
+            # Use prior covariance as inverse mass (Σ_p ≈ M^{-1})
+            # For 0D agent: Sigma_p is (K, K), mu is (K,)
+            # For 1D agent: Sigma_p is (N, K, K), mu is (N, K)
+            # For 2D agent: Sigma_p is (H, W, K, K), mu is (H, W, K)
 
-            # Apply position update to mu_q only (simplified dynamics)
-            velocity = (M_inv @ p.reshape(-1, agent.config.K).T).T.flatten() / mass_scale
+            if agent.mu_q.ndim == 1:
+                # 0D: Single Gaussian, Sigma_p is (K, K)
+                M_inv = agent.Sigma_p  # Sigma_p as inverse mass
+                velocity = (M_inv @ p) / mass_scale
+            elif agent.mu_q.ndim == 2:
+                # 1D field: Apply M^{-1} per spatial point
+                n_spatial = agent.mu_q.shape[0]
+                velocity = np.zeros_like(p)
+                p_reshaped = p.reshape(n_spatial, K)
+                for i in range(n_spatial):
+                    M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
+                    velocity[i*K:(i+1)*K] = (M_inv_i @ p_reshaped[i]) / mass_scale
+            else:
+                # 2D+ field: Simplified - use identity
+                velocity = p / mass_scale
+
             agent.mu_q = agent.mu_q + dt * velocity.reshape(agent.mu_q.shape)
 
             # Recompute gradient after position update
@@ -930,7 +946,7 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
             grad_mu_new = grad_mu  # Default to old
             for a, g in zip(active_agents, agent_grads_new):
                 if a.agent_id == aid:
-                    grad_mu_new = g.grad_mu_q.flatten()[:len(p)]
+                    grad_mu_new = g.grad_mu_q.flatten()
                     break
 
             # Half-step momentum update: p = p - (dt/2) * ∇V_new
@@ -944,9 +960,19 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
             agent_momenta[scale][aid] = p
 
             # Accumulate kinetic energy: T = (1/2) p^T M^{-1} p
-            if agent.Sigma_p.ndim == 2:
-                T_agent = 0.5 * np.dot(p, (M_inv @ p.reshape(-1, agent.config.K).T).T.flatten()) / mass_scale
+            if agent.mu_q.ndim == 1:
+                # 0D: T = (1/2) p^T Σ_p p
+                T_agent = 0.5 * np.dot(p, agent.Sigma_p @ p) / mass_scale
+            elif agent.mu_q.ndim == 2:
+                # 1D: Sum over spatial points
+                n_spatial = agent.mu_q.shape[0]
+                p_reshaped = p.reshape(n_spatial, K)
+                T_agent = 0.0
+                for i in range(n_spatial):
+                    M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
+                    T_agent += 0.5 * np.dot(p_reshaped[i], M_inv_i @ p_reshaped[i]) / mass_scale
             else:
+                # 2D+: Simplified
                 T_agent = 0.5 * np.dot(p, p) / mass_scale
             total_kinetic += T_agent
 
