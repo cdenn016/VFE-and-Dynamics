@@ -341,18 +341,18 @@ class Agent:
             smoothness_scale=self.config.mean_smoothness_scale_effective
         )
 
-        # Generate smooth Σ field
+        # Generate smooth Σ field (DIFFERENT from Sigma_q for non-zero gradients!)
         if self.config.covariance_strategy == "constant":
             from math_utils.sigma import generate_constant_field_safe
             Sigma_p_raw = generate_constant_field_safe(
                 spatial_shape, K,
-                scale=1.0 * self.config.sigma_scale,
-                min_eigenvalue=0.2 * self.config.sigma_scale,
+                scale=1.5 * self.config.sigma_scale,  # Larger scale → Σ_p ≠ Σ_q
+                min_eigenvalue=0.3 * self.config.sigma_scale,
                 rng=self.rng
             )
         else:
             Sigma_p_raw = self.cov_initializer.generate_for_agent(
-                self, scale=1.0 * self.config.sigma_scale, rng=self.rng
+                self, scale=1.5 * self.config.sigma_scale, rng=self.rng  # Different scale
             )
 
         # Enforce support constraints on Sigma directly

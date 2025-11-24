@@ -243,14 +243,16 @@ class HamiltonianTrainer:
 
     def _pack_parameters(self) -> np.ndarray:
         """
-        Pack all agent parameters into flat vector θ.
+        Pack all agent parameters into flat vector θ ON SPD MANIFOLD.
+
+        CRITICAL: For hyperbolic geometry, we parameterize by Σ_q (not L_q)!
 
         For each agent, includes:
             - mu_q (flattened)
-            - L_q (flattened, lower triangular part)
+            - Sigma_q (flattened, upper triangular part for symmetry)
 
         Returns:
-            theta: Flattened parameter vector
+            theta: Flattened parameter vector in SPD(n) × ℝ^K
         """
         params = []
 
@@ -259,26 +261,26 @@ class HamiltonianTrainer:
             mu_flat = agent.mu_q.flatten()
             params.append(mu_flat)
 
-            # Flatten L_q (Cholesky factor)
-            # Extract lower triangular part to avoid redundancy
-            L_flat = agent.L_q.reshape(-1, agent.config.K, agent.config.K)
+            # Flatten Sigma_q (symmetric, so store upper triangle)
+            K = agent.config.K
+            Sigma_flat = agent.Sigma_q.reshape(-1, K, K)
 
-            # For each spatial point, extract lower triangle
-            for L_mat in L_flat:
-                lower_indices = np.tril_indices(agent.config.K)
-                L_lower = L_mat[lower_indices]
-                params.append(L_lower)
+            # For each spatial point, extract upper triangle (includes diagonal)
+            for Sigma_mat in Sigma_flat:
+                upper_indices = np.triu_indices(K)
+                Sigma_upper = Sigma_mat[upper_indices]
+                params.append(Sigma_upper)
 
         return np.concatenate(params)
 
     def _unpack_parameters(self, theta: np.ndarray):
         """
-        Unpack flat vector θ back into agent parameters.
+        Unpack flat vector θ back into agent parameters ON SPD MANIFOLD.
 
-        Updates agent.mu_q and agent.L_q in place.
+        CRITICAL: Updates Σ_q directly (gauge-covariant), invalidates L cache.
 
         Args:
-            theta: Flattened parameter vector
+            theta: Flattened parameter vector in SPD(n) × ℝ^K
         """
         idx = 0
 
@@ -292,34 +294,39 @@ class HamiltonianTrainer:
             agent.mu_q = mu_flat.reshape(agent.mu_q.shape)
             idx += mu_size
 
-            # Unpack L_q
-            L_size = K * (K + 1) // 2  # Lower triangular elements per spatial point
+            # Unpack Sigma_q (symmetric upper triangle)
+            Sigma_size = K * (K + 1) // 2  # Upper triangular elements per spatial point
 
             for i in range(n_spatial):
-                L_lower = theta[idx:idx + L_size]
-                idx += L_size
+                Sigma_upper = theta[idx:idx + Sigma_size]
+                idx += Sigma_size
 
-                # Reconstruct matrix from lower triangular
-                L_mat = np.zeros((K, K))
-                lower_indices = np.tril_indices(K)
-                L_mat[lower_indices] = L_lower
+                # Reconstruct symmetric matrix from upper triangular
+                Sigma_mat = np.zeros((K, K))
+                upper_indices = np.triu_indices(K)
+                Sigma_mat[upper_indices] = Sigma_upper
+                # Symmetrize (copy upper to lower)
+                Sigma_mat = Sigma_mat + Sigma_mat.T - np.diag(np.diag(Sigma_mat))
 
-                # Update agent's L_q
-                if agent.L_q.ndim == 2:
+                # Update agent's Sigma_q directly (GAUGE-COVARIANT!)
+                if agent.Sigma_q.ndim == 2:
                     # 0D agent (particle)
-                    agent.L_q = L_mat
-                elif agent.L_q.ndim == 3:
+                    agent.Sigma_q = Sigma_mat.astype(np.float32)
+                elif agent.Sigma_q.ndim == 3:
                     # 1D grid
-                    agent.L_q[i] = L_mat
+                    agent.Sigma_q[i] = Sigma_mat.astype(np.float32)
                 else:
                     # 2D grid - need to map linear index to (x, y)
-                    shape = agent.L_q.shape[:2]
+                    shape = agent.Sigma_q.shape[:2]
                     x = i // shape[1]
                     y = i % shape[1]
-                    agent.L_q[x, y] = L_mat
+                    agent.Sigma_q[x, y] = Sigma_mat.astype(np.float32)
 
-            # Recompute Sigma_q from L_q
-            agent.Sigma_q = agent.L_q @ np.swapaxes(agent.L_q, -2, -1)
+            # Invalidate Cholesky cache (L computed on-demand)
+            if hasattr(agent, '_L_q_cache'):
+                agent._L_q_cache = None
+            if hasattr(agent, '_L_p_cache'):
+                agent._L_p_cache = None
 
     def _compute_metric(self, theta: np.ndarray) -> np.ndarray:
         """
@@ -397,6 +404,74 @@ class HamiltonianTrainer:
 
         return V
 
+    def _compute_velocity_hyperbolic(self, theta: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """
+        Compute velocity dθ/dt with HYPERBOLIC geodesic flow for Σ parameters.
+
+        For μ part (Euclidean): dμ/dt = Σ_p^{-1} π_μ
+        For Σ part (Hyperbolic SPD): dΣ/dt = Σ Π_Σ Σ
+
+        The Σ equation is the geodesic flow on SPD(n) with affine-invariant metric,
+        giving the manifold constant negative curvature κ = -1/4 (HYPERBOLIC!).
+
+        Args:
+            theta: [μ, Σ] parameters (flattened)
+            p: [π_μ, Π_Σ] momenta (flattened)
+
+        Returns:
+            dtheta_dt: Velocity vector with proper hyperbolic flow
+        """
+        dtheta_dt = np.zeros_like(theta)
+        idx_theta = 0
+        idx_p = 0
+
+        for agent in self.system.agents:
+            K = agent.config.K
+            n_spatial = agent.mu_q.size // K
+            mu_size = n_spatial * K
+            Sigma_size_per_point = K * (K + 1) // 2
+
+            # --- μ part (Euclidean) ---
+            mu_flat = theta[idx_theta:idx_theta + mu_size]
+            pi_mu = p[idx_p:idx_p + mu_size]
+
+            # dμ/dt = Σ_p^{-1} π (but simplified as identity for now)
+            dmu_dt = pi_mu / self.mass_scale
+            dtheta_dt[idx_theta:idx_theta + mu_size] = dmu_dt
+
+            idx_theta += mu_size
+            idx_p += mu_size
+
+            # --- Σ part (HYPERBOLIC geodesic flow!) ---
+            for i in range(n_spatial):
+                # Extract Sigma and Pi_Sigma for this spatial point
+                Sigma_upper = theta[idx_theta:idx_theta + Sigma_size_per_point]
+                Pi_upper = p[idx_p:idx_p + Sigma_size_per_point]
+
+                # Reconstruct symmetric matrices
+                Sigma_mat = np.zeros((K, K))
+                Pi_mat = np.zeros((K, K))
+                upper_indices = np.triu_indices(K)
+
+                Sigma_mat[upper_indices] = Sigma_upper
+                Sigma_mat = Sigma_mat + Sigma_mat.T - np.diag(np.diag(Sigma_mat))
+
+                Pi_mat[upper_indices] = Pi_upper
+                Pi_mat = Pi_mat + Pi_mat.T - np.diag(np.diag(Pi_mat))
+
+                # CRITICAL: Geodesic flow on hyperbolic SPD manifold
+                # dΣ/dt = Σ Π Σ  (affine-invariant metric)
+                dSigma_dt = Sigma_mat @ Pi_mat @ Sigma_mat / self.mass_scale
+
+                # Pack back to upper triangle
+                dSigma_upper = dSigma_dt[upper_indices]
+                dtheta_dt[idx_theta:idx_theta + Sigma_size_per_point] = dSigma_upper
+
+                idx_theta += Sigma_size_per_point
+                idx_p += Sigma_size_per_point
+
+        return dtheta_dt
+
     def _compute_force(self, theta: np.ndarray) -> np.ndarray:
         """
         Compute force -∇V(θ).
@@ -425,31 +500,28 @@ class HamiltonianTrainer:
 
     def _hamiltonian_equations(self, theta: np.ndarray, p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute Hamilton's equations of motion.
+        Compute Hamilton's equations of motion ON HYPERBOLIC SPD MANIFOLD.
 
-        dθ/dt = ∂H/∂p = G^{-1} p
-        dp/dt = -∂H/∂θ = -∇V - (curvature)
+        CRITICAL: For Σ parameters, uses geodesic flow on SPD(n):
+            dΣ/dt = Σ Π Σ  (affine-invariant metric, κ = -1/4)
+            dΠ/dt = -∂V/∂Σ
+
+        For μ parameters (Euclidean):
+            dμ/dt = Σ_p π_μ
+            dπ/dt = -∂V/∂μ
 
         If friction > 0, adds damping: dp/dt -= γ*p
 
         Args:
-            theta: Position (parameters)
-            p: Momentum
+            theta: Position [μ, Σ] (flattened)
+            p: Momentum [π_μ, Π_Σ] (flattened)
 
         Returns:
-            dtheta_dt: dθ/dt
-            dp_dt: dp/dt
+            dtheta_dt: Velocity with HYPERBOLIC geodesic flow for Σ
+            dp_dt: Force -∇V with optional friction
         """
-        # Get metric
-        G = self._compute_metric(theta)
-
-        try:
-            G_inv = np.linalg.inv(G + 1e-6 * np.eye(len(G)))
-        except:
-            G_inv = np.eye(len(G)) / self.mass_scale
-
-        # dθ/dt = G^{-1} p
-        dtheta_dt = G_inv @ p
+        # Compute velocity using hyperbolic geometry for Σ part
+        dtheta_dt = self._compute_velocity_hyperbolic(theta, p)
 
         # dp/dt = -∇V (ignoring curvature correction for now)
         force = self._compute_force(theta)
