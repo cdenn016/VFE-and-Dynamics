@@ -147,7 +147,8 @@ class ConsensusDetector:
 
     def check_belief_consensus_spatial(self,
                                        agent_i, agent_j,
-                                       omega_ij: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+                                       omega_ij: Optional[np.ndarray] = None,
+                                       active_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Check belief consensus **pointwise** on spatial manifolds.
 
@@ -156,6 +157,8 @@ class ConsensusDetector:
         Args:
             agent_i, agent_j: Agent objects with mu_q, Sigma_q, gauge fields
             omega_ij: Pre-computed transport operator (optional)
+            active_mask: Optional (*spatial,) boolean. If provided, only compute
+                        KL within True region (HUGE efficiency gain for sparse supports)
 
         Returns:
             (consensus_mask, kl_map):
@@ -166,31 +169,80 @@ class ConsensusDetector:
         if omega_ij is None:
             omega_ij = self._get_transport(agent_i, agent_j)
 
-        # Transport agent_j's belief to agent_i's frame
-        if omega_ij.ndim > 2:
-            mu_j_transported = np.einsum('...ij,...j->...i', omega_ij, agent_j.mu_q)
-            Sigma_j_transported = np.einsum('...ik,...kl,...jl->...ij', omega_ij, agent_j.Sigma_q, omega_ij)
+        spatial_shape = agent_i.mu_q.shape[:-1]
+        K = agent_i.mu_q.shape[-1]
+
+        # If no active_mask provided, compute overlap region
+        if active_mask is None:
+            # Default: compute everywhere (original behavior)
+            active_mask = np.ones(spatial_shape, dtype=bool)
+
+        n_active = np.sum(active_mask)
+
+        # Fast path: if very few active points, use batch extraction
+        if n_active < 0.3 * np.prod(spatial_shape) and n_active > 0:
+            # Extract active points into batch arrays
+            active_indices = np.argwhere(active_mask)
+
+            # Extract mu and Sigma at active points
+            mu_i_batch = np.array([agent_i.mu_q[tuple(idx)] for idx in active_indices])  # (N, K)
+            Sigma_i_batch = np.array([agent_i.Sigma_q[tuple(idx)] for idx in active_indices])  # (N, K, K)
+            mu_j_batch = np.array([agent_j.mu_q[tuple(idx)] for idx in active_indices])
+            Sigma_j_batch = np.array([agent_j.Sigma_q[tuple(idx)] for idx in active_indices])
+
+            # Extract transport at active points
+            if omega_ij.ndim > 2:
+                omega_batch = np.array([omega_ij[tuple(idx)] for idx in active_indices])  # (N, K, K)
+            else:
+                omega_batch = np.broadcast_to(omega_ij, (len(active_indices), K, K))
+
+            # Transport agent_j's beliefs: batch einsum
+            mu_j_transported = np.einsum('nij,nj->ni', omega_batch, mu_j_batch)
+            Sigma_j_transported = np.einsum('nik,nkl,njl->nij', omega_batch, Sigma_j_batch, omega_batch)
+
+            # Sanitize batch
+            from math_utils.numerical_utils import sanitize_sigma
+            Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
+
+            # Compute KL for batch
+            kl_batch = kl_gaussian(mu_i_batch, Sigma_i_batch, mu_j_transported, Sigma_j_transported)
+
+            if self.use_symmetric_kl:
+                kl_reverse = kl_gaussian(mu_j_transported, Sigma_j_transported, mu_i_batch, Sigma_i_batch)
+                kl_batch = (kl_batch + kl_reverse) / 2
+
+            # Scatter back to full array
+            kl_div = np.full(spatial_shape, np.inf, dtype=np.float32)
+            for i, idx in enumerate(active_indices):
+                kl_div[tuple(idx)] = kl_batch[i]
+
         else:
-            # Point manifold - no spatial structure
-            mu_j_transported = omega_ij @ agent_j.mu_q
-            Sigma_j_transported = omega_ij @ agent_j.Sigma_q @ omega_ij.T
+            # Original full-grid computation (for dense active regions)
+            if omega_ij.ndim > 2:
+                mu_j_transported = np.einsum('...ij,...j->...i', omega_ij, agent_j.mu_q)
+                Sigma_j_transported = np.einsum('...ik,...kl,...jl->...ij', omega_ij, agent_j.Sigma_q, omega_ij)
+            else:
+                mu_j_transported = omega_ij @ agent_j.mu_q
+                Sigma_j_transported = omega_ij @ agent_j.Sigma_q @ omega_ij.T
 
-        # Sanitize
-        from math_utils.numerical_utils import sanitize_sigma
-        Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
+            from math_utils.numerical_utils import sanitize_sigma
+            Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
 
-        # Compute KL divergence (may be spatial array)
-        kl_div = kl_gaussian(
-            agent_i.mu_q, agent_i.Sigma_q,
-            mu_j_transported, Sigma_j_transported
-        )
-
-        if self.use_symmetric_kl:
-            kl_div_reverse = kl_gaussian(
-                mu_j_transported, Sigma_j_transported,
-                agent_i.mu_q, agent_i.Sigma_q
+            kl_div = kl_gaussian(
+                agent_i.mu_q, agent_i.Sigma_q,
+                mu_j_transported, Sigma_j_transported
             )
-            kl_div = (kl_div + kl_div_reverse) / 2
+
+            if self.use_symmetric_kl:
+                kl_div_reverse = kl_gaussian(
+                    mu_j_transported, Sigma_j_transported,
+                    agent_i.mu_q, agent_i.Sigma_q
+                )
+                kl_div = (kl_div + kl_div_reverse) / 2
+
+            # Set inactive points to inf
+            if not np.all(active_mask):
+                kl_div = np.where(active_mask, kl_div, np.inf)
 
         # Compute consensus mask pointwise
         consensus_mask = kl_div < self.belief_threshold
@@ -255,13 +307,16 @@ class ConsensusDetector:
 
     def check_model_consensus_spatial(self,
                                       agent_i, agent_j,
-                                      omega_ij: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+                                      omega_ij: Optional[np.ndarray] = None,
+                                      active_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Check model consensus **pointwise** on spatial manifolds.
 
         Args:
             agent_i, agent_j: Agent objects with mu_p, Sigma_p, gauge fields
             omega_ij: Pre-computed transport operator (optional)
+            active_mask: Optional (*spatial,) boolean. If provided, only compute
+                        KL within True region (efficiency optimization)
 
         Returns:
             (consensus_mask, kl_map):
@@ -272,32 +327,75 @@ class ConsensusDetector:
         if omega_ij is None:
             omega_ij = self._get_transport(agent_i, agent_j)
 
-        # Transport agent_j's model to agent_i's frame
-        if omega_ij.ndim > 2:
-            mu_j_transported = np.einsum('...ij,...j->...i', omega_ij, agent_j.mu_p)
-            Sigma_j_transported = np.einsum('...ik,...kl,...jl->...ij', omega_ij, agent_j.Sigma_p, omega_ij)
+        spatial_shape = agent_i.mu_p.shape[:-1]
+        K = agent_i.mu_p.shape[-1]
+
+        # If no active_mask provided, compute everywhere
+        if active_mask is None:
+            active_mask = np.ones(spatial_shape, dtype=bool)
+
+        n_active = np.sum(active_mask)
+
+        # Fast path: sparse active region
+        if n_active < 0.3 * np.prod(spatial_shape) and n_active > 0:
+            active_indices = np.argwhere(active_mask)
+
+            # Extract at active points
+            mu_i_batch = np.array([agent_i.mu_p[tuple(idx)] for idx in active_indices])
+            Sigma_i_batch = np.array([agent_i.Sigma_p[tuple(idx)] for idx in active_indices])
+            mu_j_batch = np.array([agent_j.mu_p[tuple(idx)] for idx in active_indices])
+            Sigma_j_batch = np.array([agent_j.Sigma_p[tuple(idx)] for idx in active_indices])
+
+            if omega_ij.ndim > 2:
+                omega_batch = np.array([omega_ij[tuple(idx)] for idx in active_indices])
+            else:
+                omega_batch = np.broadcast_to(omega_ij, (len(active_indices), K, K))
+
+            # Transport
+            mu_j_transported = np.einsum('nij,nj->ni', omega_batch, mu_j_batch)
+            Sigma_j_transported = np.einsum('nik,nkl,njl->nij', omega_batch, Sigma_j_batch, omega_batch)
+
+            from math_utils.numerical_utils import sanitize_sigma
+            Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
+
+            kl_batch = kl_gaussian(mu_i_batch, Sigma_i_batch, mu_j_transported, Sigma_j_transported)
+
+            if self.use_symmetric_kl:
+                kl_reverse = kl_gaussian(mu_j_transported, Sigma_j_transported, mu_i_batch, Sigma_i_batch)
+                kl_batch = (kl_batch + kl_reverse) / 2
+
+            # Scatter back
+            kl_div = np.full(spatial_shape, np.inf, dtype=np.float32)
+            for i, idx in enumerate(active_indices):
+                kl_div[tuple(idx)] = kl_batch[i]
+
         else:
-            mu_j_transported = omega_ij @ agent_j.mu_p
-            Sigma_j_transported = omega_ij @ agent_j.Sigma_p @ omega_ij.T
+            # Full grid computation
+            if omega_ij.ndim > 2:
+                mu_j_transported = np.einsum('...ij,...j->...i', omega_ij, agent_j.mu_p)
+                Sigma_j_transported = np.einsum('...ik,...kl,...jl->...ij', omega_ij, agent_j.Sigma_p, omega_ij)
+            else:
+                mu_j_transported = omega_ij @ agent_j.mu_p
+                Sigma_j_transported = omega_ij @ agent_j.Sigma_p @ omega_ij.T
 
-        # Sanitize
-        from math_utils.numerical_utils import sanitize_sigma
-        Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
+            from math_utils.numerical_utils import sanitize_sigma
+            Sigma_j_transported = sanitize_sigma(Sigma_j_transported, eps=1e-6)
 
-        # Compute KL divergence
-        kl_div = kl_gaussian(
-            agent_i.mu_p, agent_i.Sigma_p,
-            mu_j_transported, Sigma_j_transported
-        )
-
-        if self.use_symmetric_kl:
-            kl_div_reverse = kl_gaussian(
-                mu_j_transported, Sigma_j_transported,
-                agent_i.mu_p, agent_i.Sigma_p
+            kl_div = kl_gaussian(
+                agent_i.mu_p, agent_i.Sigma_p,
+                mu_j_transported, Sigma_j_transported
             )
-            kl_div = (kl_div + kl_div_reverse) / 2
 
-        # Compute consensus mask pointwise
+            if self.use_symmetric_kl:
+                kl_div_reverse = kl_gaussian(
+                    mu_j_transported, Sigma_j_transported,
+                    agent_i.mu_p, agent_i.Sigma_p
+                )
+                kl_div = (kl_div + kl_div_reverse) / 2
+
+            if not np.all(active_mask):
+                kl_div = np.where(active_mask, kl_div, np.inf)
+
         consensus_mask = kl_div < self.model_threshold
 
         return consensus_mask, kl_div

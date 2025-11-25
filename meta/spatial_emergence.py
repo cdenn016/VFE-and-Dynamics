@@ -239,23 +239,31 @@ def compute_cluster_consensus_field(
     # Collect pairwise KL fields
     kl_fields = []
 
+    # Threshold for considering a point "active" in support
+    support_threshold = 0.01
+
     for i in range(n_cluster):
         for j in range(i + 1, n_cluster):
             agent_i = cluster_agents[i]
             agent_j = cluster_agents[j]
 
+            # Compute pairwise overlap mask (only compute KL where both have support)
+            chi_i = agent_i.support.chi_weight
+            chi_j = agent_j.support.chi_weight
+            overlap_mask = (chi_i > support_threshold) & (chi_j > support_threshold)
+
             # Get transport operator
             omega_ij = consensus_detector._get_transport(agent_i, agent_j)
 
-            # Belief KL field
+            # Belief KL field (only in overlap region)
             _, belief_kl = consensus_detector.check_belief_consensus_spatial(
-                agent_i, agent_j, omega_ij=omega_ij
+                agent_i, agent_j, omega_ij=omega_ij, active_mask=overlap_mask
             )
 
             if check_models:
-                # Model KL field
+                # Model KL field (only in overlap region)
                 _, model_kl = consensus_detector.check_model_consensus_spatial(
-                    agent_i, agent_j, omega_ij=omega_ij
+                    agent_i, agent_j, omega_ij=omega_ij, active_mask=overlap_mask
                 )
                 # Combined divergence
                 pair_kl = belief_kl + model_kl
@@ -307,6 +315,9 @@ def compute_coherence_scores_spatial(
 
     coherence_scores = np.zeros(n_cluster)
 
+    # Threshold for considering a point "active" in support
+    support_threshold = 0.01
+
     for i, agent_i in enumerate(cluster_agents):
         # Average KL to all other agents in cluster
         total_kl = 0.0
@@ -316,9 +327,14 @@ def compute_coherence_scores_spatial(
             if i == j:
                 continue
 
+            # Compute pairwise overlap within region
+            chi_i = agent_i.support.chi_weight
+            chi_j = agent_j.support.chi_weight
+            overlap_mask = (chi_i > support_threshold) & (chi_j > support_threshold) & region_mask
+
             omega_ij = consensus_detector._get_transport(agent_i, agent_j)
             _, kl_field = consensus_detector.check_belief_consensus_spatial(
-                agent_i, agent_j, omega_ij=omega_ij
+                agent_i, agent_j, omega_ij=omega_ij, active_mask=overlap_mask
             )
 
             # Average KL within region
