@@ -517,3 +517,233 @@ def critical_damping_config() -> SimulationConfig:
         lambda_obs=0.0,
         lambda_phi=0.0,
     )
+
+
+# =============================================================================
+# Damping Regime Experiment Configurations
+# =============================================================================
+
+def damping_regime_overdamped_config() -> SimulationConfig:
+    """
+    Overdamped (Bayesian-like) dynamics configuration.
+
+    From psych manuscript Eq. 36-37:
+    Δ = γ² - 4KM > 0 (overdamped)
+
+    Uses standard gradient flow trainer (no Hamiltonian).
+    Monotonic decay, no oscillation - like particle through thick fluid.
+    """
+    return SimulationConfig(
+        experiment_name="_damping_overdamped",
+        experiment_description="Overdamped (Bayesian) gradient flow dynamics",
+
+        # Use gradient flow (overdamped = infinite friction limit)
+        enable_hamiltonian=False,
+
+        # Standard setup for regime comparison
+        n_agents=1,  # Single agent for clean comparison
+        K_latent=3,
+        n_steps=200,
+        log_every=1,
+        enable_emergence=False,
+
+        # Learning rates act as inverse friction
+        lr_mu_q=0.1,
+        lr_sigma_q=0.01,
+        lr_mu_p=0.0,
+        lr_sigma_p=0.0,
+        lr_phi=0.0,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=0.0,
+        lambda_prior_align=1.0,  # Acts as spring constant K
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
+
+
+def damping_regime_critical_config() -> SimulationConfig:
+    """
+    Critically damped dynamics configuration.
+
+    From psych manuscript Eq. 36-37:
+    Δ = γ² - 4KM = 0 (critical)
+    γ_c = 2√(KM) = optimal learning
+
+    Fastest approach to equilibrium without oscillation.
+    """
+    return SimulationConfig(
+        experiment_name="_damping_critical",
+        experiment_description="Critically damped Hamiltonian dynamics",
+
+        # Hamiltonian with critical friction
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=1.0,  # Critical damping γ = γ_c
+        hamiltonian_mass_scale=1.0,
+
+        # Standard setup
+        n_agents=1,
+        K_latent=3,
+        n_steps=200,
+        log_every=1,
+        enable_emergence=False,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=0.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
+
+
+def damping_regime_underdamped_config() -> SimulationConfig:
+    """
+    Underdamped (oscillatory) dynamics configuration.
+
+    From psych manuscript Eq. 36-37:
+    Δ = γ² - 4KM < 0 (underdamped)
+
+    Novel prediction: belief oscillation!
+    Damped frequency: ω = √(K/M - γ²/4M²)
+    """
+    return SimulationConfig(
+        experiment_name="_damping_underdamped",
+        experiment_description="Underdamped oscillatory Hamiltonian dynamics",
+
+        # Hamiltonian with light friction (underdamped)
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=0.1,  # Light damping γ << γ_c
+        hamiltonian_mass_scale=1.0,
+
+        # Standard setup
+        n_agents=1,
+        K_latent=3,
+        n_steps=200,
+        log_every=1,
+        enable_emergence=False,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=0.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
+
+
+def momentum_transfer_config() -> SimulationConfig:
+    """
+    Two-agent momentum transfer experiment configuration.
+
+    From psych manuscript Section 4.6, Eq. 48-52:
+    Momentum current: J_{k→i} = β_{ik} Λ̃_k (μ̃_k - μ_i)
+
+    Tests recoil effect: influencer's momentum decreases
+    as momentum flows to coupled partner.
+    """
+    return SimulationConfig(
+        experiment_name="_momentum_transfer",
+        experiment_description="Two-agent momentum transfer (recoil effect)",
+
+        # Hamiltonian for momentum dynamics
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=0.05,  # Light damping
+        hamiltonian_mass_scale=1.0,
+
+        # Two coupled agents
+        n_agents=2,
+        K_latent=3,
+        n_steps=300,
+        log_every=1,
+        enable_emergence=False,
+
+        # Belief alignment creates coupling
+        lambda_self=1.0,
+        lambda_belief_align=1.0,  # Coupling β
+        lambda_prior_align=0.1,   # Light prior anchoring
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+
+        kappa_beta=1.0,  # Softmax temperature for attention
+    )
+
+
+def resonance_experiment_config() -> SimulationConfig:
+    """
+    Resonance curve experiment configuration.
+
+    From psych manuscript Eq. 40-42:
+    ω_res = √(K/M) = resonance frequency
+    A(ω) = (f₀/M) / √((ω₀² - ω²)² + (γω/M)²)
+
+    Tests: optimal persuasion at resonance frequency.
+    """
+    return SimulationConfig(
+        experiment_name="_resonance",
+        experiment_description="Cognitive resonance curve experiment",
+
+        # Hamiltonian with moderate damping
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=0.3,
+        hamiltonian_mass_scale=1.0,
+
+        # Single agent with periodic forcing
+        n_agents=1,
+        K_latent=3,
+        n_steps=500,  # Long run for steady state
+        log_every=1,
+        enable_emergence=False,
+
+        # Energy weights (K = prior_align)
+        lambda_self=1.0,
+        lambda_belief_align=0.0,
+        lambda_prior_align=1.0,
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
+
+
+def belief_perseverance_config() -> SimulationConfig:
+    """
+    Belief perseverance decay experiment configuration.
+
+    From psych manuscript Eq. 43:
+    τ = M/γ = Λ/γ (decay time proportional to precision/damping)
+
+    Tests: high-precision beliefs persist longer after debunking.
+    """
+    return SimulationConfig(
+        experiment_name="_perseverance",
+        experiment_description="Belief perseverance decay after debunking",
+
+        # Hamiltonian for persistence dynamics
+        enable_hamiltonian=True,
+        hamiltonian_integrator="Verlet",
+        hamiltonian_dt=0.01,
+        hamiltonian_friction=0.5,  # Fixed damping for comparison
+        hamiltonian_mass_scale=1.0,
+
+        # Single agent at false belief
+        n_agents=1,
+        K_latent=3,
+        n_steps=200,
+        log_every=1,
+        enable_emergence=False,
+
+        # Energy weights
+        lambda_self=1.0,
+        lambda_belief_align=0.0,
+        lambda_prior_align=1.0,  # Evidence strength K
+        lambda_obs=0.0,
+        lambda_phi=0.0,
+    )
