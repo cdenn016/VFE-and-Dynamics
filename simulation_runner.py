@@ -758,10 +758,14 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
     - Symplectic integration (energy-preserving)
     - Multi-scale hierarchy (meta-agent emergence)
     - Cross-scale prior propagation (Ouroboros tower)
+    - Full gauge-invariant field theory (when hamiltonian_include_gauge=True)
 
-    Key insight: Each agent at each scale has its own phase space (θ, p).
-    The Hamiltonian includes coupling terms that preserve total energy
-    across the hierarchy.
+    Key insight: Each agent at each scale has its own phase space:
+    - (μ, π_μ): Mean dynamics with Fisher-Rao metric
+    - (φ, π_φ): Gauge dynamics with Killing form metric (when enabled)
+
+    The complete Hamiltonian H = T_μ + T_φ + V is gauge-invariant when
+    all components transform properly under gauge transformations.
 
     EXPERIMENTAL: This mode is under active development.
     """
@@ -769,6 +773,11 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
     from meta.gradient_adapter import GradientSystemAdapter
     from gradients.gradient_engine import compute_natural_gradients
     from gradients.free_energy_clean import compute_total_free_energy
+
+    # Import gauge-invariant components if enabled
+    include_gauge = cfg.hamiltonian_include_gauge
+    if include_gauge:
+        from geometry.lie_algebra import LieAlgebra, LieGroup
 
     print(f"\n{'='*70}")
     print("HIERARCHICAL HAMILTONIAN DYNAMICS")
@@ -779,6 +788,7 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
     print(f"  Mass scale: {cfg.hamiltonian_mass_scale}")
     print(f"  Emergence: ENABLED")
     print(f"  Ouroboros Tower: {'ENABLED' if cfg.enable_hyperprior_tower else 'DISABLED'}")
+    print(f"  Gauge Field (φ) Dynamics: {'ENABLED (gauge-invariant)' if include_gauge else 'DISABLED'}")
     regime = "Conservative (underdamped)" if cfg.hamiltonian_friction < 0.01 else "Damped"
     print(f"  Regime: {regime}")
 
@@ -800,17 +810,26 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
 
     engine = HierarchicalEvolutionEngine(system, hier_config)
 
+    # Initialize Lie algebra for gauge dynamics
+    gauge_algebra = None
+    if include_gauge:
+        gauge_algebra = LieAlgebra(LieGroup.SO3)  # SO(3) gauge group
+
     # Initialize phase space for all agents (θ, p)
     # Each agent gets its own momentum initialized to zero
-    # NOTE: For simplicity, we only track mu dynamics (not full Sigma dynamics)
-    agent_momenta = {}  # Dict[scale][agent_id] -> momentum array
+    agent_momenta = {}  # Dict[scale][agent_id] -> {'mu': π_μ, 'phi': π_φ}
     for scale, agents in system.agents.items():
         agent_momenta[scale] = {}
         for agent in agents:
-            # Initialize momentum to zero (start from rest)
-            # Only track mu_q dynamics for simplified hierarchical Hamiltonian
-            theta_size = agent.mu_q.size
-            agent_momenta[scale][agent.agent_id] = np.zeros(theta_size)
+            # Initialize momenta to zero (start from rest)
+            momenta = {
+                'mu': np.zeros(agent.mu_q.size),  # π_μ (mean momentum)
+            }
+            # Add gauge momentum if enabled
+            if include_gauge and hasattr(agent, 'gauge') and hasattr(agent.gauge, 'phi'):
+                momenta['phi'] = np.zeros(agent.gauge.phi.size)  # π_φ (gauge momentum)
+
+            agent_momenta[scale][agent.agent_id] = momenta
 
     # Initialize geometry tracker if enabled
     geometry_tracker = None
@@ -856,11 +875,13 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
             compute_full_energies=True
         )
 
-    # History tracking (extended for Hamiltonian)
+    # History tracking (extended for Hamiltonian with gauge decomposition)
     history = {
         'step': [],
         'total': [],
-        'kinetic_energy': [],
+        'kinetic_energy': [],       # Total T = T_mu + T_phi
+        'kinetic_energy_mu': [],    # T_μ: Mean dynamics kinetic energy
+        'kinetic_energy_phi': [],   # T_φ: Gauge dynamics kinetic energy
         'potential_energy': [],
         'total_hamiltonian': [],
         'energy_drift': [],
@@ -892,51 +913,94 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
         agent_grads = compute_natural_gradients(adapter)
 
         # Leapfrog integration for each agent across all scales
-        total_kinetic = 0.0
+        # Tracks kinetic energy decomposition: T = T_μ + T_φ
+        total_kinetic_mu = 0.0   # Kinetic energy from mean dynamics
+        total_kinetic_phi = 0.0  # Kinetic energy from gauge dynamics
 
         for agent, grads in zip(active_agents, agent_grads):
             scale = agent.scale if hasattr(agent, 'scale') else 0
             aid = agent.agent_id
             K = agent.config.K
 
-            # Ensure momentum exists for this agent
+            # Ensure momentum dict exists for this agent
             if scale not in agent_momenta:
                 agent_momenta[scale] = {}
             if aid not in agent_momenta[scale]:
-                theta_size = agent.mu_q.size
-                agent_momenta[scale][aid] = np.zeros(theta_size)
+                # Initialize momentum dict
+                momenta = {'mu': np.zeros(agent.mu_q.size)}
+                if include_gauge and hasattr(agent, 'gauge') and hasattr(agent.gauge, 'phi'):
+                    momenta['phi'] = np.zeros(agent.gauge.phi.size)
+                agent_momenta[scale][aid] = momenta
 
-            p = agent_momenta[scale][aid]
+            momenta = agent_momenta[scale][aid]
+            p_mu = momenta['mu']
 
             # Get gradient for mu_q (full gradient, same shape as mu_q)
             grad_mu = grads.grad_mu_q.flatten()
 
-            # Half-step momentum update: p = p - (dt/2) * ∇V
-            p = p - 0.5 * dt * grad_mu
+            # ===== MEAN DYNAMICS (μ, π_μ) =====
+            # Half-step momentum update: π_μ = π_μ - (dt/2) * ∂V/∂μ
+            p_mu = p_mu - 0.5 * dt * grad_mu
 
-            # Full-step position update: μ = μ + dt * M^{-1} * p
-            # Use prior covariance as inverse mass (Σ_p ≈ M^{-1})
-            # For 0D agent: Sigma_p is (K, K), mu is (K,)
-            # For 1D agent: Sigma_p is (N, K, K), mu is (N, K)
-            # For 2D agent: Sigma_p is (H, W, K, K), mu is (H, W, K)
-
+            # Full-step position update: μ = μ + dt * M_μ^{-1} * π_μ
+            # Use prior covariance as inverse mass (Σ_p ≈ M_μ^{-1})
             if agent.mu_q.ndim == 1:
                 # 0D: Single Gaussian, Sigma_p is (K, K)
                 M_inv = agent.Sigma_p  # Sigma_p as inverse mass
-                velocity = (M_inv @ p) / mass_scale
+                velocity_mu = (M_inv @ p_mu) / mass_scale
             elif agent.mu_q.ndim == 2:
                 # 1D field: Apply M^{-1} per spatial point
                 n_spatial = agent.mu_q.shape[0]
-                velocity = np.zeros_like(p)
-                p_reshaped = p.reshape(n_spatial, K)
+                velocity_mu = np.zeros_like(p_mu)
+                p_reshaped = p_mu.reshape(n_spatial, K)
                 for i in range(n_spatial):
                     M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
-                    velocity[i*K:(i+1)*K] = (M_inv_i @ p_reshaped[i]) / mass_scale
+                    velocity_mu[i*K:(i+1)*K] = (M_inv_i @ p_reshaped[i]) / mass_scale
             else:
                 # 2D+ field: Simplified - use identity
-                velocity = p / mass_scale
+                velocity_mu = p_mu / mass_scale
 
-            agent.mu_q = agent.mu_q + dt * velocity.reshape(agent.mu_q.shape)
+            agent.mu_q = agent.mu_q + dt * velocity_mu.reshape(agent.mu_q.shape)
+
+            # ===== GAUGE DYNAMICS (φ, π_φ) =====
+            # Only evolve gauge if enabled and agent has gauge field
+            if include_gauge and 'phi' in momenta and hasattr(agent, 'gauge'):
+                p_phi = momenta['phi']
+                phi = agent.gauge.phi
+
+                # Compute gauge gradient: ∂V/∂φ
+                # Use finite differences on the transported KL divergence
+                eps = 1e-5
+                grad_phi = np.zeros_like(phi)
+                for i in range(len(phi)):
+                    phi_plus = phi.copy()
+                    phi_plus[i] += eps
+                    phi_minus = phi.copy()
+                    phi_minus[i] -= eps
+
+                    # Temporarily perturb phi and compute energy difference
+                    old_phi = agent.gauge.phi.copy()
+                    agent.gauge.phi = phi_plus
+                    adapter_plus = GradientSystemAdapter(active_agents, system.system_config)
+                    E_plus = compute_total_free_energy(adapter_plus).total
+
+                    agent.gauge.phi = phi_minus
+                    adapter_minus = GradientSystemAdapter(active_agents, system.system_config)
+                    E_minus = compute_total_free_energy(adapter_minus).total
+
+                    agent.gauge.phi = old_phi  # Restore
+                    grad_phi[i] = (E_plus - E_minus) / (2 * eps)
+
+                # Half-step gauge momentum: π_φ = π_φ - (dt/2) * ∂V/∂φ
+                p_phi = p_phi - 0.5 * dt * grad_phi
+
+                # Full-step gauge position: φ = φ + dt * M_φ^{-1} * π_φ
+                # For SO(3), the metric is the Killing form (identity in standard basis)
+                velocity_phi = p_phi / mass_scale
+                agent.gauge.phi = phi + dt * velocity_phi
+
+                # Store updated gauge momentum (will be updated again after final half-step)
+                momenta['phi'] = p_phi
 
             # Recompute gradient after position update
             adapter_new = GradientSystemAdapter(active_agents, system.system_config)
@@ -949,32 +1013,79 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
                     grad_mu_new = g.grad_mu_q.flatten()
                     break
 
-            # Half-step momentum update: p = p - (dt/2) * ∇V_new
-            p = p - 0.5 * dt * grad_mu_new
+            # Half-step mean momentum update: π_μ = π_μ - (dt/2) * ∂V/∂μ_new
+            p_mu = p_mu - 0.5 * dt * grad_mu_new
 
-            # Apply friction if specified
+            # Final half-step for gauge momentum (if enabled)
+            if include_gauge and 'phi' in momenta and hasattr(agent, 'gauge'):
+                p_phi = momenta['phi']
+                phi = agent.gauge.phi
+
+                # Recompute gauge gradient at new position
+                eps = 1e-5
+                grad_phi_new = np.zeros_like(phi)
+                for i in range(len(phi)):
+                    phi_plus = phi.copy()
+                    phi_plus[i] += eps
+                    phi_minus = phi.copy()
+                    phi_minus[i] -= eps
+
+                    old_phi = agent.gauge.phi.copy()
+                    agent.gauge.phi = phi_plus
+                    adapter_plus = GradientSystemAdapter(active_agents, system.system_config)
+                    E_plus = compute_total_free_energy(adapter_plus).total
+
+                    agent.gauge.phi = phi_minus
+                    adapter_minus = GradientSystemAdapter(active_agents, system.system_config)
+                    E_minus = compute_total_free_energy(adapter_minus).total
+
+                    agent.gauge.phi = old_phi
+                    grad_phi_new[i] = (E_plus - E_minus) / (2 * eps)
+
+                # Half-step gauge momentum: π_φ = π_φ - (dt/2) * ∂V/∂φ_new
+                p_phi = p_phi - 0.5 * dt * grad_phi_new
+
+                # Apply friction to gauge momentum
+                if friction > 0:
+                    p_phi = p_phi * np.exp(-friction * dt)
+
+                momenta['phi'] = p_phi
+
+                # Gauge kinetic energy: T_φ = (1/2) ⟨π_φ, π_φ⟩_𝔤
+                # For SO(3), use Killing form (identity in standard basis)
+                if gauge_algebra is not None:
+                    T_phi_agent = gauge_algebra.kinetic_energy(p_phi)
+                else:
+                    T_phi_agent = 0.5 * np.dot(p_phi, p_phi) / mass_scale
+                total_kinetic_phi += T_phi_agent
+
+            # Apply friction to mean momentum
             if friction > 0:
-                p = p * np.exp(-friction * dt)
+                p_mu = p_mu * np.exp(-friction * dt)
 
-            # Store updated momentum
-            agent_momenta[scale][aid] = p
+            # Store updated mean momentum
+            momenta['mu'] = p_mu
+            agent_momenta[scale][aid] = momenta
 
-            # Accumulate kinetic energy: T = (1/2) p^T M^{-1} p
+            # Mean kinetic energy: T_μ = (1/2) π_μ^T M_μ^{-1} π_μ
             if agent.mu_q.ndim == 1:
-                # 0D: T = (1/2) p^T Σ_p p
-                T_agent = 0.5 * np.dot(p, agent.Sigma_p @ p) / mass_scale
+                # 0D: T_μ = (1/2) π_μ^T Σ_p π_μ
+                T_mu_agent = 0.5 * np.dot(p_mu, agent.Sigma_p @ p_mu) / mass_scale
             elif agent.mu_q.ndim == 2:
                 # 1D: Sum over spatial points
                 n_spatial = agent.mu_q.shape[0]
-                p_reshaped = p.reshape(n_spatial, K)
-                T_agent = 0.0
+                p_reshaped = p_mu.reshape(n_spatial, K)
+                T_mu_agent = 0.0
                 for i in range(n_spatial):
                     M_inv_i = agent.Sigma_p[i] if agent.Sigma_p.ndim == 3 else agent.Sigma_p
-                    T_agent += 0.5 * np.dot(p_reshaped[i], M_inv_i @ p_reshaped[i]) / mass_scale
+                    T_mu_agent += 0.5 * np.dot(p_reshaped[i], M_inv_i @ p_reshaped[i]) / mass_scale
             else:
                 # 2D+: Simplified
-                T_agent = 0.5 * np.dot(p, p) / mass_scale
-            total_kinetic += T_agent
+                T_mu_agent = 0.5 * np.dot(p_mu, p_mu) / mass_scale
+            total_kinetic_mu += T_mu_agent
+
+        # Total kinetic energy
+        total_kinetic = total_kinetic_mu + total_kinetic_phi
 
         # Total Hamiltonian
         H = total_kinetic + V
@@ -1017,6 +1128,8 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
         history['step'].append(step)
         history['total'].append(energies.total)
         history['kinetic_energy'].append(total_kinetic)
+        history['kinetic_energy_mu'].append(total_kinetic_mu)
+        history['kinetic_energy_phi'].append(total_kinetic_phi)
         history['potential_energy'].append(V)
         history['total_hamiltonian'].append(H)
         history['energy_drift'].append(energy_drift)
@@ -1076,15 +1189,28 @@ def _run_hierarchical_hamiltonian_training(system, cfg, output_dir):
 
 def _plot_hierarchical_hamiltonian(history, output_dir):
     """
-    Plot Hamiltonian + emergence evolution.
+    Plot Hamiltonian + emergence evolution with gauge-invariant decomposition.
 
-    Creates a 2x2 figure showing:
+    Creates a 2x3 figure showing:
     - Hamiltonian components (T, V, H)
+    - Kinetic energy decomposition (T_μ, T_φ)
     - Energy drift
     - Hierarchy growth
     - Emergence events
+    - Phase space dynamics
     """
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Check if we have gauge decomposition data
+    has_gauge = 'kinetic_energy_phi' in history and any(
+        x > 0 for x in history.get('kinetic_energy_phi', [0])
+    )
+
+    if has_gauge:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Flatten for consistent indexing
+        axes = np.array([[axes[0, 0], axes[0, 1], None],
+                         [axes[1, 0], axes[1, 1], None]])
 
     steps = history['step']
 
@@ -1109,30 +1235,141 @@ def _plot_hierarchical_hamiltonian(history, output_dir):
     ax2.legend()
     ax2.grid(alpha=0.3)
 
-    # 3. Hierarchy evolution
-    ax3 = axes[1, 0]
-    ax3.plot(steps, history['n_scales'], 'g-', marker='o', markersize=3, label='# Scales')
-    ax3.plot(steps, history['n_active_agents'], 'b-', marker='s', markersize=3, label='# Active Agents')
-    ax3.set_xlabel('Step')
-    ax3.set_ylabel('Count')
-    ax3.set_title('Hierarchical Structure')
-    ax3.legend()
-    ax3.grid(alpha=0.3)
+    # 3. Kinetic energy decomposition (only if gauge enabled)
+    if has_gauge and axes[0, 2] is not None:
+        ax3 = axes[0, 2]
+        ax3.plot(steps, history['kinetic_energy_mu'], 'b-', linewidth=2, label=r'$T_\mu$ (mean)')
+        ax3.plot(steps, history['kinetic_energy_phi'], 'm-', linewidth=2, label=r'$T_\phi$ (gauge)')
+        ax3.plot(steps, history['kinetic_energy'], 'k--', linewidth=1.5, alpha=0.5, label='Total T')
+        ax3.set_xlabel('Step')
+        ax3.set_ylabel('Kinetic Energy')
+        ax3.set_title(r'Kinetic Decomposition: $T = T_\mu + T_\phi$')
+        ax3.legend()
+        ax3.grid(alpha=0.3)
 
-    # 4. Energy with emergence markers
-    ax4 = axes[1, 1]
-    ax4.plot(steps, history['total'], 'b-', linewidth=2, label='Free Energy')
-    for event in history['emergence_events']:
-        ax4.axvline(event['step'], color='red', alpha=0.3, linestyle='--')
+    # 4. Hierarchy evolution
+    ax4 = axes[1, 0]
+    ax4.plot(steps, history['n_scales'], 'g-', marker='o', markersize=3, label='# Scales')
+    ax4.plot(steps, history['n_active_agents'], 'b-', marker='s', markersize=3, label='# Active Agents')
     ax4.set_xlabel('Step')
-    ax4.set_ylabel('Free Energy')
-    ax4.set_title('Free Energy (red = emergence)')
+    ax4.set_ylabel('Count')
+    ax4.set_title('Hierarchical Structure')
+    ax4.legend()
+    ax4.grid(alpha=0.3)
+
+    # 5. Energy with emergence markers
+    ax5 = axes[1, 1]
+    ax5.plot(steps, history['total'], 'b-', linewidth=2, label='Free Energy')
+    for event in history['emergence_events']:
+        ax5.axvline(event['step'], color='red', alpha=0.3, linestyle='--')
+    ax5.set_xlabel('Step')
+    ax5.set_ylabel('Free Energy')
+    ax5.set_title('Free Energy (red = emergence)')
+    ax5.legend()
+    ax5.grid(alpha=0.3)
+
+    # 6. Gauge fraction (only if gauge enabled)
+    if has_gauge and axes[1, 2] is not None:
+        ax6 = axes[1, 2]
+        total_T = np.array(history['kinetic_energy']) + 1e-10
+        T_phi = np.array(history['kinetic_energy_phi'])
+        gauge_fraction = T_phi / total_T
+        ax6.plot(steps, gauge_fraction, 'm-', linewidth=2)
+        ax6.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+        ax6.set_xlabel('Step')
+        ax6.set_ylabel(r'$T_\phi / T$')
+        ax6.set_title('Gauge Kinetic Fraction')
+        ax6.set_ylim(0, 1)
+        ax6.grid(alpha=0.3)
+
+    plt.tight_layout()
+
+    fig_path = output_dir / "hierarchical_hamiltonian_evolution.png"
+    plt.savefig(fig_path, dpi=150)
+    plt.close()
+    print(f"✓ Saved {fig_path}")
+
+    # Additional gauge-specific plot if enabled
+    if has_gauge:
+        _plot_gauge_dynamics(history, output_dir)
+
+
+def _plot_gauge_dynamics(history, output_dir):
+    """
+    Detailed plot of gauge field dynamics.
+
+    Shows the interplay between mean (μ) and gauge (φ) degrees of freedom
+    in the full gauge-invariant Hamiltonian: H = T_μ + T_φ + V.
+
+    Key insight: Energy can flow between mean and gauge sectors while
+    the total Hamiltonian is approximately conserved.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    steps = history['step']
+
+    T_mu = np.array(history['kinetic_energy_mu'])
+    T_phi = np.array(history['kinetic_energy_phi'])
+    T_total = T_mu + T_phi + 1e-10
+    V = np.array(history['potential_energy'])
+    H = np.array(history['total_hamiltonian'])
+
+    # 1. Energy partition (stacked area)
+    ax1 = axes[0, 0]
+    ax1.fill_between(steps, 0, T_mu, alpha=0.7, color='blue', label=r'$T_\mu$ (mean)')
+    ax1.fill_between(steps, T_mu, T_mu + T_phi, alpha=0.7, color='magenta', label=r'$T_\phi$ (gauge)')
+    ax1.fill_between(steps, T_mu + T_phi, T_mu + T_phi + V, alpha=0.5, color='red', label='V (potential)')
+    ax1.plot(steps, H, 'k--', linewidth=2, label='H (total)')
+    ax1.set_xlabel('Step')
+    ax1.set_ylabel('Energy')
+    ax1.set_title('Energy Partition: H = T_μ + T_φ + V')
+    ax1.legend(loc='upper right')
+    ax1.grid(alpha=0.3)
+
+    # 2. Kinetic energy ratio (reveals energy exchange dynamics)
+    ax2 = axes[0, 1]
+    ratio = T_phi / T_total
+    ax2.plot(steps, ratio, 'm-', linewidth=2)
+    ax2.fill_between(steps, 0, ratio, alpha=0.3, color='magenta')
+    ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='Equipartition')
+    ax2.set_xlabel('Step')
+    ax2.set_ylabel(r'$T_\phi / (T_\mu + T_\phi)$')
+    ax2.set_title('Gauge Kinetic Fraction')
+    ax2.set_ylim(0, 1)
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+
+    # 3. Energy flow rate (time derivative of kinetic energies)
+    ax3 = axes[1, 0]
+    if len(steps) > 1:
+        dT_mu = np.diff(T_mu)
+        dT_phi = np.diff(T_phi)
+        dV = np.diff(V)
+        ax3.plot(steps[1:], dT_mu, 'b-', linewidth=1.5, alpha=0.8, label=r'$dT_\mu/dt$')
+        ax3.plot(steps[1:], dT_phi, 'm-', linewidth=1.5, alpha=0.8, label=r'$dT_\phi/dt$')
+        ax3.plot(steps[1:], dV, 'r-', linewidth=1.5, alpha=0.8, label=r'$dV/dt$')
+        ax3.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+        ax3.set_xlabel('Step')
+        ax3.set_ylabel('Energy Flow Rate')
+        ax3.set_title('Energy Exchange Between Sectors')
+        ax3.legend()
+        ax3.grid(alpha=0.3)
+    else:
+        ax3.text(0.5, 0.5, 'Insufficient data', ha='center', va='center', transform=ax3.transAxes)
+
+    # 4. Virial-like ratio: 2T vs V (for insight into dynamics)
+    ax4 = axes[1, 1]
+    virial = 2 * T_total / (np.abs(V) + 1e-10)
+    ax4.semilogy(steps, virial, 'g-', linewidth=2)
+    ax4.axhline(y=1.0, color='orange', linestyle='--', alpha=0.7, label='Virial equilibrium')
+    ax4.set_xlabel('Step')
+    ax4.set_ylabel('2T/|V|')
+    ax4.set_title('Virial Ratio (log scale)')
     ax4.legend()
     ax4.grid(alpha=0.3)
 
     plt.tight_layout()
 
-    fig_path = output_dir / "hierarchical_hamiltonian_evolution.png"
+    fig_path = output_dir / "gauge_dynamics.png"
     plt.savefig(fig_path, dpi=150)
     plt.close()
     print(f"✓ Saved {fig_path}")
