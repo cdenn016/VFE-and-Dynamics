@@ -40,6 +40,9 @@ from math_utils.so3_frechet import average_gauge_frames_so3, so3_exp, so3_log
 from config import AgentConfig
 from agent.masking import MaskConfig
 
+# Conditional import for spatial emergence (avoid circular import)
+# Actual import done in methods that need it
+
 
 # =============================================================================
 # Scale Indexing
@@ -1688,6 +1691,266 @@ class MultiScaleSystem:
         else:
             mode_str = "continuous flow - constituents evolving 🌊"
         print(f"[Auto-Condensation ζ={scale}] Detected {len(valid_clusters)} consensus clusters ({mode_str})")
+
+        return new_meta_agents
+
+    def auto_detect_and_condense_spatial(
+        self,
+        scale: int,
+        kl_threshold: float = 0.1,
+        min_region_size: int = 4,
+        min_volume_fraction: float = 0.0,
+        smooth_sigma: float = 1.5,
+        deactivate_constituents: bool = False
+    ) -> List[HierarchicalAgent]:
+        """
+        Detect and form meta-agents with spatial coherence (arbitrary dimensions).
+
+        For spatial manifolds, this method:
+        1. Finds agent clusters via consensus
+        2. Computes spatial consensus fields for each cluster
+        3. Identifies connected regions of consensus
+        4. Forms meta-agents with support matching consensus geometry
+
+        The resulting meta-agents have EMERGENT shapes determined by
+        information topology, not predetermined geometry.
+
+        Args:
+            scale: Scale to check for consensus
+            kl_threshold: KL divergence threshold for spatial consensus
+            min_region_size: Minimum region size in points (absolute)
+            min_volume_fraction: Minimum region size as fraction (relative)
+            smooth_sigma: Gaussian smoothing width for boundaries (preserves smooth sections)
+            deactivate_constituents: Whether to freeze constituents
+
+        Returns:
+            List of newly formed meta-agents (may be more than #clusters if
+            a cluster's consensus region is spatially disconnected)
+
+        Theory:
+            Meta-agent shape is determined by the TOPOLOGY OF CONSENSUS:
+            - Where do the constituent agents agree?
+            - Connected regions become single meta-agents
+            - Disconnected consensus → multiple meta-agents from one cluster
+
+            Smoothing ensures meta-agents are SMOOTH SECTIONS (differentiable
+            support functions), maintaining gauge-theoretic structure.
+        """
+        from meta.consensus import ConsensusDetector
+        from meta.spatial_emergence import (
+            SpatialEmergenceDetector,
+            SpatialConsensusRegion
+        )
+
+        # Handle 0D case: fall back to standard method
+        if self.base_manifold.is_point:
+            print("[Spatial Emergence] 0D manifold - using standard condensation")
+            return self.auto_detect_and_condense(
+                scale=scale,
+                kl_threshold=kl_threshold,
+                deactivate_constituents=deactivate_constituents
+            )
+
+        # Get free agents at this scale
+        agents_at_scale = self.get_active_agents_at_scale(scale, free_only=True)
+
+        if len(agents_at_scale) < 2:
+            return []
+
+        # Create consensus detector
+        detector = ConsensusDetector(
+            belief_threshold=kl_threshold,
+            model_threshold=kl_threshold,
+            use_symmetric_kl=True
+        )
+
+        # Create spatial emergence detector
+        spatial_detector = SpatialEmergenceDetector(
+            consensus_detector=detector,
+            kl_threshold=kl_threshold,
+            min_region_size=min_region_size,
+            min_volume_fraction=min_volume_fraction,
+            smooth_sigma=smooth_sigma,
+            connectivity='full',
+            aggregation='mean',
+            check_models=True
+        )
+
+        # Detect emergence regions
+        # Need to create a wrapper for the spatial detector
+        class AgentWrapper:
+            def __init__(self, agents_list):
+                self.agents = agents_list
+                self.n_agents = len(agents_list)
+
+        wrapper = AgentWrapper(agents_at_scale)
+        regions = spatial_detector.detect_emergence_regions(wrapper, source_scale=0)
+
+        if not regions:
+            print(f"[Spatial Emergence ζ={scale}] No consensus regions detected")
+            return []
+
+        # Form meta-agents from spatial regions
+        new_meta_agents = self._form_meta_agents_from_spatial_regions(
+            source_scale=scale,
+            regions=regions,
+            agents_at_scale=agents_at_scale,
+            spatial_detector=spatial_detector,
+            deactivate_constituents=deactivate_constituents
+        )
+
+        n_clusters = len(set(tuple(r.cluster_indices) for r in regions))
+        print(f"[Spatial Emergence ζ={scale}] {n_clusters} clusters → {len(regions)} regions → {len(new_meta_agents)} meta-agents")
+
+        return new_meta_agents
+
+    def _form_meta_agents_from_spatial_regions(
+        self,
+        source_scale: int,
+        regions: List,  # List[SpatialConsensusRegion]
+        agents_at_scale: List[HierarchicalAgent],
+        spatial_detector,  # SpatialEmergenceDetector
+        deactivate_constituents: bool = False
+    ) -> List[HierarchicalAgent]:
+        """
+        Form meta-agents from detected spatial consensus regions.
+
+        Each SpatialConsensusRegion becomes one meta-agent with support
+        matching the smoothed consensus geometry.
+
+        Args:
+            source_scale: Scale of constituent agents
+            regions: List of SpatialConsensusRegion from detection
+            agents_at_scale: All agents at source scale
+            spatial_detector: SpatialEmergenceDetector instance
+            deactivate_constituents: Whether to freeze constituents
+
+        Returns:
+            List of newly formed meta-agents
+        """
+        target_scale = source_scale + 1
+        source_agents = self.agents[source_scale]
+
+        # Check emergence level cap
+        if self.max_emergence_levels is not None and target_scale > self.max_emergence_levels:
+            print(f"[Level Cap] Cannot form meta-agents at scale {target_scale}")
+            return []
+
+        new_meta_agents = []
+
+        for region in regions:
+            partition = region.cluster_indices
+
+            if len(partition) < 2:
+                continue
+
+            # Get constituent agents
+            constituents = [agents_at_scale[i] for i in partition]
+
+            # Use region's coherence scores
+            coherence_scores = region.coherence_scores
+            if coherence_scores is None:
+                coherence_scores = self._compute_coherence_scores(constituents, field_type='belief')
+
+            # Identify leader
+            leader_idx, leader_score, leadership_dist = self._identify_leader(
+                constituents, coherence_scores
+            )
+
+            # Compute renormalized fields
+            mu_q, Sigma_q = self._renormalize_beliefs(constituents, coherence_scores)
+            mu_p, Sigma_p = self._renormalize_models(constituents, coherence_scores)
+            phi = self._average_gauge_frames(constituents, coherence_scores)
+
+            # Create meta-agent
+            meta_index = len(self.agents[target_scale])
+            meta_id = f"meta_{target_scale}_{meta_index}_r{region.component_id}"
+
+            constituent_scale_indices = [
+                ScaleIndex(source_scale, i) for i in partition
+            ]
+
+            belief_coherence = float(np.mean(coherence_scores))
+            model_coherence_scores = self._compute_coherence_scores(constituents, field_type='model')
+            model_coherence = float(np.mean(model_coherence_scores))
+
+            meta_descriptor = MetaAgentDescriptor(
+                scale_index=ScaleIndex(target_scale, meta_index),
+                constituent_indices=constituent_scale_indices,
+                emergence_time=self.current_time,
+                belief_coherence=belief_coherence,
+                model_coherence=model_coherence,
+                leader_index=leader_idx,
+                leader_score=leader_score,
+                leadership_distribution=leadership_dist
+            )
+
+            meta_agent = HierarchicalAgent(
+                scale=target_scale,
+                local_index=meta_index,
+                constituent_indices=constituent_scale_indices,
+                meta_descriptor=meta_descriptor,
+                agent_id=meta_id,
+                config=constituents[0].config,
+                rng=np.random.default_rng(hash(meta_id) % 2**32),
+                base_manifold=self.base_manifold
+            )
+
+            # KEY DIFFERENCE: Use spatial support from consensus region
+            meta_agent.support = spatial_detector.create_meta_agent_support(
+                region=region,
+                agents=agents_at_scale,
+                weight_by_coherence=True
+            )
+            meta_agent.generators = constituents[0].generators
+
+            meta_agent._initialize_belief_covariance()
+            meta_agent._initialize_prior_covariance()
+            meta_agent._initialize_gauge()
+
+            meta_agent.mu_q = mu_q
+            meta_agent.Sigma_q = Sigma_q
+            meta_agent.mu_p = mu_p
+            meta_agent.Sigma_p = Sigma_p
+            meta_agent.gauge.phi = phi
+
+            # Set up relationships
+            meta_agent.constituents = constituents.copy()
+            for agent in constituents:
+                agent.parent_meta = meta_agent
+
+            # Add to system
+            self.agents[target_scale].append(meta_agent)
+            new_meta_agents.append(meta_agent)
+
+            # Optionally deactivate constituents
+            if deactivate_constituents:
+                for agent in constituents:
+                    agent.is_active = False
+
+            # Record condensation event with spatial info
+            self.condensation_events.append({
+                'time': self.current_time,
+                'source_scale': source_scale,
+                'target_scale': target_scale,
+                'n_constituents': len(partition),
+                'constituent_indices': constituent_scale_indices,
+                'leader_index': leader_idx,
+                'leader_score': leader_score,
+                'coherence': {
+                    'belief': belief_coherence,
+                    'model': model_coherence
+                },
+                'spatial': {
+                    'region_volume': region.volume,
+                    'volume_fraction': region.volume_fraction,
+                    'centroid': region.centroid,
+                    'mean_consensus_strength': region.mean_consensus_strength
+                }
+            })
+
+            print(f"  {meta_agent.scale_index}: {region.volume} pts "
+                  f"({region.volume_fraction:.1%}) @ {tuple(int(x) for x in region.centroid)}")
 
         return new_meta_agents
 
