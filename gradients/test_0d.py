@@ -860,17 +860,15 @@ def apply_global_gauge_with_axis(system, axis: np.ndarray):
         # L has shape (..., K, K)
         # ------------------------------------------------------------------
 
-        # Belief covariances
-        L_q = a.L_q.astype(np.float64)
-        Sigma_q = L_q @ np.swapaxes(L_q, -1, -2)       # (..., K, K)
+        # Belief covariances - set Sigma_q directly (L_q is computed on-demand)
+        Sigma_q = a.Sigma_q.astype(np.float64)
         Sigma_q_rot = np.einsum("ab,...bc,dc->...ad", R_K, Sigma_q, R_K)
-        a.L_q = np.linalg.cholesky(Sigma_q_rot).astype(np.float32)
+        a.Sigma_q = Sigma_q_rot.astype(np.float32)
 
-        # Prior / model covariances
-        L_p = a.L_p.astype(np.float64)
-        Sigma_p = L_p @ np.swapaxes(L_p, -1, -2)       # (..., K, K)
+        # Prior / model covariances - set Sigma_p directly (L_p is computed on-demand)
+        Sigma_p = a.Sigma_p.astype(np.float64)
         Sigma_p_rot = np.einsum("ab,...bc,dc->...ad", R_K, Sigma_p, R_K)
-        a.L_p = np.linalg.cholesky(Sigma_p_rot).astype(np.float32)
+        a.Sigma_p = Sigma_p_rot.astype(np.float32)
 
         # ------------------------------------------------------------------
         # Gauge field φ: shape (..., 3)
@@ -1040,10 +1038,11 @@ def apply_global_gauge_spatial_with_axis(system, axis: np.ndarray):
         a.mu_q = np.einsum("ij,...j->...i", R_K, a.mu_q)
         a.mu_p = np.einsum("ij,...j->...i", R_K, a.mu_p)
 
-        # ----- L fields: shape (*S, K, K) -----
-        # L'(..., i, k) = R_K[i, j] L(..., j, k)
-        a.L_q = np.einsum("ij,...jk->...ik", R_K, a.L_q)
-        a.L_p = np.einsum("ij,...jk->...ik", R_K, a.L_p)
+        # ----- Σ fields: shape (*S, K, K) -----
+        # Σ'(..., a, b) = R_K[a, i] Σ(..., i, j) R_K[b, j]  (i.e., R @ Σ @ R^T)
+        # L_q and L_p are computed on-demand from Sigma_q and Sigma_p
+        a.Sigma_q = np.einsum("ai,...ij,bj->...ab", R_K, a.Sigma_q, R_K)
+        a.Sigma_p = np.einsum("ai,...ij,bj->...ab", R_K, a.Sigma_p, R_K)
 
         # ----- φ field: shape (..., 3) -----
         if hasattr(a, "gauge") and hasattr(a.gauge, "phi"):

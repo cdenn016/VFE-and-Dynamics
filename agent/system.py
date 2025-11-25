@@ -440,25 +440,25 @@ class MultiAgentSystem:
 
 
     def _shared_prior_from_agents(self):
-        """Compute the shared prior (μ_p, L_p) given config.identical_priors_source."""
+        """Compute the shared prior (μ_p, Σ_p) given config.identical_priors_source."""
         if self.config.identical_priors_source == "mean":
-            # average across agents
+            # average across agents - use Sigma_p (L_p is computed on-demand)
             mu_stack = np.stack([a.mu_p for a in self.agents], axis=0)
-            L_stack  = np.stack([a.L_p for a in self.agents], axis=0)
+            Sigma_stack = np.stack([a.Sigma_p for a in self.agents], axis=0)
             mu_shared = mu_stack.mean(axis=0)
-            L_shared  = L_stack.mean(axis=0)
-            return mu_shared, L_shared
+            Sigma_shared = Sigma_stack.mean(axis=0)
+            return mu_shared, Sigma_shared
         else:
             # 'first'
             a0 = self.agents[0]
-            return a0.mu_p.copy(), a0.L_p.copy()
-    
+            return a0.mu_p.copy(), a0.Sigma_p.copy()
+
     def _apply_identical_priors_now(self):
         """Copy a shared prior into all agents."""
-        mu_shared, L_shared = self._shared_prior_from_agents()
+        mu_shared, Sigma_shared = self._shared_prior_from_agents()
         for a in self.agents:
             a.mu_p = mu_shared.copy()
-            a.L_p  = L_shared.copy()
+            a.Sigma_p = Sigma_shared.copy()  # L_p is computed on-demand
         # invalidate any caches that depend on priors, if applicable
         for a in self.agents:
             a.invalidate_caches() if hasattr(a, "invalidate_caches") else None

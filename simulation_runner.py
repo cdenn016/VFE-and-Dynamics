@@ -287,16 +287,18 @@ def _apply_identical_priors(system, system_cfg):
     if not base_agents:
         return
 
+    # Use Sigma_p (covariance) instead of L_p (Cholesky factor)
+    # L_p is a computed property without a setter
     if system_cfg.identical_priors_source == "mean":
         mu_p_shared = sum(a.mu_p for a in base_agents) / len(base_agents)
-        L_p_shared = sum(a.L_p for a in base_agents) / len(base_agents)
+        Sigma_p_shared = sum(a.Sigma_p for a in base_agents) / len(base_agents)
     else:
         mu_p_shared = base_agents[0].mu_p.copy()
-        L_p_shared = base_agents[0].L_p.copy()
+        Sigma_p_shared = base_agents[0].Sigma_p.copy()
 
     for a in base_agents:
         a.mu_p = mu_p_shared.copy()
-        a.L_p = L_p_shared.copy()
+        a.Sigma_p = Sigma_p_shared.copy()  # This will invalidate L_p cache
         if hasattr(a, 'invalidate_caches'):
             a.invalidate_caches()
 
