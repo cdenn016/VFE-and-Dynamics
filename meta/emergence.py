@@ -808,38 +808,46 @@ class MultiScaleSystem:
     
     def _renormalize_beliefs(self,
                            constituents: List[HierarchicalAgent],
-                           coherence_scores: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+                           coherence_scores: Optional[np.ndarray] = None,
+                           region_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute renormalized belief fields via coherence-weighted gauge transport.
-        
+
         Uses Presence × Coherence weighting:
             wᵢ(c) ∝ χᵢ(c) · C̄ᵢ
             μ_M(c) = Σᵢ wᵢ(c) · Ωᵢⱼ[μᵢ(c)]
-        
+
         For 0D: χᵢ = 1, so weights are purely coherence-based
         For spatial: weights vary with location based on presence
-        
+
+        Args:
+            constituents: List of constituent agents
+            coherence_scores: Optional precomputed coherence scores
+            region_mask: Optional (*spatial,) boolean mask. If provided, only
+                        compute fields within the True region (efficiency optimization
+                        for spatial emergence where meta-agent support is restricted)
+
         Returns:
             (mu_M, Sigma_M): Renormalized belief parameters
         """
         ref = constituents[0]
         K = ref.K
-        
+
         # Compute coherence scores if not provided
         if coherence_scores is None:
             coherence_scores = self._compute_coherence_scores(constituents)
-        
+
         if ref.base_manifold.is_point:
             # === 0D CASE (Transformers) ===
             # All χᵢ = 1, weight by coherence only
-            
+
             mu_weighted = np.zeros(K)
             Sigma_weighted = np.zeros((K, K))
             total_weight = 0.0
-            
+
             for i, agent in enumerate(constituents):
                 C_i = coherence_scores[i]
-                
+
                 # Transport to reference frame
                 omega = compute_transport(
                     ref.gauge.phi,
@@ -847,26 +855,27 @@ class MultiScaleSystem:
                     ref.generators,
                     validate=False
                 )
-                
+
                 # Accumulate weighted transported statistics
                 mu_weighted += C_i * (omega @ agent.mu_q)
                 Sigma_weighted += C_i * (omega @ agent.Sigma_q @ omega.T)
                 total_weight += C_i
-            
+
             # Normalize
             mu_M = mu_weighted / total_weight
             Sigma_M = Sigma_weighted / total_weight
-            
+
             return mu_M, Sigma_M
-        
+
         else:
             # === SPATIAL CASE ===
             # Weight by presence × coherence at each location
-            
+
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            Sigma_M = np.zeros((*spatial_shape, K, K))
-            
+            # Initialize Sigma_M to identity everywhere (vectorized)
+            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+
             # Precompute transports to reference frame
             transports = []
             for agent in constituents:
@@ -877,13 +886,26 @@ class MultiScaleSystem:
                     validate=False
                 )
                 transports.append(omega)
-            
-            # At each spatial location
-            for c_idx in np.ndindex(spatial_shape):
+
+            # Determine which points to compute
+            # If region_mask provided, only compute within that region (HUGE efficiency gain)
+            if region_mask is not None:
+                # Get indices where mask is True
+                active_indices = np.argwhere(region_mask)
+                n_active = len(active_indices)
+                n_total = np.prod(spatial_shape)
+                # Convert to tuples for indexing
+                points_to_compute = [tuple(idx) for idx in active_indices]
+            else:
+                # Compute everywhere (original behavior)
+                points_to_compute = list(np.ndindex(spatial_shape))
+
+            # At each spatial location in the region
+            for c_idx in points_to_compute:
                 mu_weighted = np.zeros(K)
                 Sigma_weighted = np.zeros((K, K))
                 total_weight = 0.0
-                
+
                 for i, agent in enumerate(constituents):
                     # Presence at this location
                     chi_i = agent.support.chi_weight[c_idx]
@@ -911,66 +933,71 @@ class MultiScaleSystem:
                     mu_weighted += w_i * (omega_c @ agent.mu_q[c_idx])
                     Sigma_weighted += w_i * (omega_c @ agent.Sigma_q[c_idx] @ omega_c.T)
                     total_weight += w_i
-                
+
                 # Normalize
                 if total_weight > 1e-6:
                     mu_M[c_idx] = mu_weighted / total_weight
                     Sigma_M[c_idx] = Sigma_weighted / total_weight
-                else:
-                    # Fallback: no substantial presence
-                    mu_M[c_idx] = np.zeros(K)
-                    Sigma_M[c_idx] = np.eye(K)
-            
+                # else: keep default (zeros for mu, identity for Sigma)
+
             return mu_M, Sigma_M
     
     def _renormalize_models(self,
                           constituents: List[HierarchicalAgent],
-                          coherence_scores: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+                          coherence_scores: Optional[np.ndarray] = None,
+                          region_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute renormalized model/prior fields via coherence-weighted transport.
-        
+
         Uses same Presence × Coherence weighting as beliefs:
             wᵢ(c) ∝ χᵢ(c) · C̄ᵢ
             p_M(c) = Σᵢ wᵢ(c) · Ωᵢⱼ[pᵢ(c)]
-        
+
+        Args:
+            constituents: List of constituent agents
+            coherence_scores: Optional precomputed coherence scores
+            region_mask: Optional (*spatial,) boolean mask. If provided, only
+                        compute fields within the True region (efficiency optimization)
+
         Returns:
             (mu_M, Sigma_M): Renormalized model parameters
         """
         # Same mathematical procedure as beliefs, just different fields
         ref = constituents[0]
         K = ref.K
-        
+
         if coherence_scores is None:
             coherence_scores = self._compute_coherence_scores(constituents, field_type='model')
-        
+
         if ref.base_manifold.is_point:
             # 0D case
             mu_weighted = np.zeros(K)
             Sigma_weighted = np.zeros((K, K))
             total_weight = 0.0
-            
+
             for i, agent in enumerate(constituents):
                 C_i = coherence_scores[i]
-                
+
                 omega = compute_transport(
                     ref.gauge.phi,
                     agent.gauge.phi,
                     ref.generators,
                     validate=False
                 )
-                
+
                 mu_weighted += C_i * (omega @ agent.mu_p)
                 Sigma_weighted += C_i * (omega @ agent.Sigma_p @ omega.T)
                 total_weight += C_i
-            
+
             return mu_weighted / total_weight, Sigma_weighted / total_weight
-        
+
         else:
             # Spatial case
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            Sigma_M = np.zeros((*spatial_shape, K, K))
-            
+            # Initialize Sigma_M to identity everywhere (vectorized)
+            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+
             transports = []
             for agent in constituents:
                 omega = compute_transport(
@@ -980,12 +1007,19 @@ class MultiScaleSystem:
                     validate=False
                 )
                 transports.append(omega)
-            
-            for c_idx in np.ndindex(spatial_shape):
+
+            # Determine which points to compute
+            if region_mask is not None:
+                active_indices = np.argwhere(region_mask)
+                points_to_compute = [tuple(idx) for idx in active_indices]
+            else:
+                points_to_compute = list(np.ndindex(spatial_shape))
+
+            for c_idx in points_to_compute:
                 mu_weighted = np.zeros(K)
                 Sigma_weighted = np.zeros((K, K))
                 total_weight = 0.0
-                
+
                 for i, agent in enumerate(constituents):
                     chi_i = agent.support.chi_weight[c_idx]
                     if chi_i < 1e-6:
@@ -1005,40 +1039,41 @@ class MultiScaleSystem:
                     mu_weighted += w_i * (omega_c @ agent.mu_p[c_idx])
                     Sigma_weighted += w_i * (omega_c @ agent.Sigma_p[c_idx] @ omega_c.T)
                     total_weight += w_i
-                
+
                 if total_weight > 1e-6:
                     mu_M[c_idx] = mu_weighted / total_weight
                     Sigma_M[c_idx] = Sigma_weighted / total_weight
-                else:
-                    mu_M[c_idx] = np.zeros(K)
-                    Sigma_M[c_idx] = np.eye(K)
-            
+                # else: keep default (zeros for mu, identity for Sigma)
+
             return mu_M, Sigma_M
     
     def _average_gauge_frames(self,
                             constituents: List[HierarchicalAgent],
                             coherence_scores: Optional[np.ndarray] = None,
-                            method: str = 'frechet') -> np.ndarray:
+                            method: str = 'frechet',
+                            region_mask: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Compute average gauge frame on SO(3) with coherence weighting.
-        
+
         Uses proper Fréchet mean (geometric average) on the SO(3) manifold:
         1. Map gauge frames to rotation matrices: Rᵢ = exp(φᵢ)
-        2. Compute weighted Fréchet mean R̄ 
+        2. Compute weighted Fréchet mean R̄
         3. Map back to Lie algebra: φ̄ = log(R̄)
-        
+
         Weighting:
             - 0D: wᵢ ∝ C̄ᵢ (coherence only)
             - Spatial: wᵢ ∝ χᵢ(center) · C̄ᵢ (presence × coherence at center)
-        
+
         Args:
             constituents: List of agents to average
             coherence_scores: Optional precomputed coherence scores
             method: 'frechet' (geometric, default) or 'euclidean' (fast approximation)
-        
+            region_mask: Optional (*spatial,) boolean mask. If provided, only
+                        compute within the True region (efficiency optimization)
+
         Returns:
-            phi_M: Averaged gauge frame in so(3), shape (3,)
-        
+            phi_M: Averaged gauge frame in so(3), shape (*spatial, 3) or (3,)
+
         Notes:
             - Euclidean average only valid for small deviations (< 0.5 rad)
             - Fréchet mean is geometrically correct but ~10x slower
@@ -1046,7 +1081,7 @@ class MultiScaleSystem:
         """
         if coherence_scores is None:
             coherence_scores = self._compute_coherence_scores(constituents)
-        
+
         # Extract gauge frames
         phis = [agent.gauge.phi for agent in constituents]
 
@@ -1084,8 +1119,15 @@ class MultiScaleSystem:
                         f"  All constituents must have same spatial shape and gauge group!"
                     )
 
-            # Loop over all spatial points
-            for idx in np.ndindex(spatial_shape):
+            # Determine which points to compute
+            if region_mask is not None:
+                active_indices = np.argwhere(region_mask)
+                points_to_compute = [tuple(idx) for idx in active_indices]
+            else:
+                points_to_compute = list(np.ndindex(spatial_shape))
+
+            # Loop over spatial points in region
+            for idx in points_to_compute:
                 # Extract axis-angle vectors (shape (3,)) at this spatial point from all agents
                 phis_at_point = [phi[idx] for phi in phis]
 
@@ -1857,10 +1899,20 @@ class MultiScaleSystem:
                 constituents, coherence_scores
             )
 
-            # Compute renormalized fields
-            mu_q, Sigma_q = self._renormalize_beliefs(constituents, coherence_scores)
-            mu_p, Sigma_p = self._renormalize_models(constituents, coherence_scores)
-            phi = self._average_gauge_frames(constituents, coherence_scores)
+            # Get region mask for efficient computation
+            # Only compute fields within the consensus region (HUGE efficiency gain)
+            region_mask = region.component_mask
+
+            # Compute renormalized fields (restricted to consensus region)
+            mu_q, Sigma_q = self._renormalize_beliefs(
+                constituents, coherence_scores, region_mask=region_mask
+            )
+            mu_p, Sigma_p = self._renormalize_models(
+                constituents, coherence_scores, region_mask=region_mask
+            )
+            phi = self._average_gauge_frames(
+                constituents, coherence_scores, region_mask=region_mask
+            )
 
             # Create meta-agent
             meta_index = len(self.agents[target_scale])
