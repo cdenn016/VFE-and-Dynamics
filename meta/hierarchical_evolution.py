@@ -242,6 +242,17 @@ class HierarchicalEvolutionEngine:
                     GradientApplier.apply_identical_priors_lock_to_scale(self.system, scale=0)
 
         # =====================================================================
+        # Phase 3.5: Re-Renormalize Meta-Agents (Bottom-Up Flow)
+        # =====================================================================
+        # CRITICAL: Meta-agents do NOT receive direct gradient updates.
+        # Their state is always derived from renormalization of constituents.
+        # This ensures proper hierarchical dynamics: base agents evolve via
+        # gradients, meta-agents reflect the coarse-grained collective state.
+        if self.system.max_scale() > 0:
+            n_rerenorm = self.system.re_renormalize_meta_agents()
+            metrics['n_meta_rerenormalized'] = n_rerenorm
+
+        # =====================================================================
         # Phase 4: Consensus Detection (Periodic)
         # =====================================================================
         if self.step_count % self.config.consensus_check_interval == 0:
@@ -284,6 +295,9 @@ class HierarchicalEvolutionEngine:
 
         Only updates agents when accumulated information exceeds threshold.
 
+        CRITICAL: Meta-agents (scale > 0) do NOT receive direct gradient updates!
+        Their state comes from renormalization of constituents below.
+
         Args:
             gradients: List of AgentGradients for all active agents
             learning_rate: Learning rate
@@ -302,6 +316,12 @@ class HierarchicalEvolutionEngine:
         use_filtering = self.config.enable_timescale_filtering and has_hierarchy
 
         for agent, grad in zip(active_agents, gradients):
+            # CRITICAL: Meta-agents do NOT receive direct gradient updates!
+            # Their state comes from renormalization of constituents (bottom-up flow).
+            # Only base agents (scale 0) get gradient-based evolution.
+            if agent.scale > 0:
+                continue
+
             # Compute information change from gradient
             delta_info = self._compute_info_change(agent, grad)
             metrics['info_changes'].append(delta_info)
