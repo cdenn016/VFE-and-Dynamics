@@ -1653,8 +1653,19 @@ class MultiScaleSystem:
 
                     # Handle spatial manifolds: kl_belief may be array (*spatial,)
                     if np.ndim(kl_belief) > 0:
-                        kl_belief_max = np.max(kl_belief)  # Strictest criterion
-                        kl_belief_mean = np.mean(kl_belief)  # For reporting
+                        # Only compute max/mean within OVERLAP region
+                        chi_i = agent_i.support.chi_weight
+                        chi_j = agent_j.support.chi_weight
+                        overlap_mask = (chi_i > 0.01) & (chi_j > 0.01)
+
+                        if np.any(overlap_mask):
+                            kl_in_overlap = kl_belief[overlap_mask]
+                            kl_belief_max = np.max(kl_in_overlap)
+                            kl_belief_mean = np.mean(kl_in_overlap)
+                        else:
+                            kl_belief_max = np.inf
+                            kl_belief_mean = np.inf
+
                         belief_ok = "✓" if kl_belief_max < kl_threshold else "✗"
                         kl_belief_str = f"mean={kl_belief_mean:.6f} max={kl_belief_max:.6f}"
                     else:
@@ -1690,8 +1701,16 @@ class MultiScaleSystem:
 
                         # Handle spatial manifolds: kl_model may be array (*spatial,)
                         if np.ndim(kl_model) > 0:
-                            kl_model_max = np.max(kl_model)  # Strictest criterion
-                            kl_model_mean = np.mean(kl_model)  # For reporting
+                            # Only compute max/mean within OVERLAP region
+                            # (chi_i, chi_j, overlap_mask already computed above for beliefs)
+                            if np.any(overlap_mask):
+                                kl_in_overlap = kl_model[overlap_mask]
+                                kl_model_max = np.max(kl_in_overlap)
+                                kl_model_mean = np.mean(kl_in_overlap)
+                            else:
+                                kl_model_max = np.inf
+                                kl_model_mean = np.inf
+
                             model_ok = "✓" if kl_model_max < kl_threshold else "✗"
                             kl_model_str = f"mean={kl_model_mean:.6f} max={kl_model_max:.6f}"
                         else:
