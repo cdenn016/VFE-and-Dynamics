@@ -818,11 +818,71 @@ class MultiScaleSystem:
                   f"(L={meta.meta.leader_score:.3f})")
 
         return new_meta_agents
-    
+
+    def re_renormalize_meta_agents(self) -> int:
+        """
+        Re-compute meta-agent fields from current constituent states.
+
+        CRITICAL for proper hierarchical dynamics:
+        Meta-agents do NOT receive direct gradient updates.
+        Instead, their state is always derived from renormalization
+        of their constituents (bottom-up information flow).
+
+        This should be called after base agents update, so meta-agents
+        reflect the evolved constituent beliefs.
+
+        Returns:
+            Number of meta-agents updated
+        """
+        n_updated = 0
+
+        # Iterate over all scales above 0 (meta-agents)
+        for scale in sorted(self.agents.keys()):
+            if scale == 0:
+                continue  # Base agents don't get re-renormalized
+
+            for meta_agent in self.agents[scale]:
+                if not meta_agent.is_active:
+                    continue
+
+                constituents = meta_agent.constituents
+                if len(constituents) == 0:
+                    continue
+
+                # Re-compute coherence scores
+                coherence_scores = self._compute_coherence_scores(
+                    constituents, field_type='belief'
+                )
+
+                # Re-renormalize belief fields
+                mu_q, Sigma_q = self._renormalize_beliefs(
+                    constituents, coherence_scores
+                )
+                meta_agent.mu_q = mu_q.astype(np.float32)
+                meta_agent.Sigma_q = Sigma_q.astype(np.float32)
+
+                # Re-renormalize model/prior fields
+                model_coherence = self._compute_coherence_scores(
+                    constituents, field_type='model'
+                )
+                mu_p, Sigma_p = self._renormalize_models(
+                    constituents, model_coherence
+                )
+                meta_agent.mu_p = mu_p.astype(np.float32)
+                meta_agent.Sigma_p = Sigma_p.astype(np.float32)
+
+                # Re-average gauge frames
+                phi = self._average_gauge_frames(constituents, coherence_scores)
+                meta_agent.gauge.phi = phi.astype(np.float32)
+
+                n_updated += 1
+
+        return n_updated
+
     # =========================================================================
     # Renormalization Methods
     # =========================================================================
-    
+
     def _renormalize_beliefs(self,
                            constituents: List[HierarchicalAgent],
                            coherence_scores: Optional[np.ndarray] = None,
