@@ -185,24 +185,29 @@ class HierarchicalEvolutionEngine:
 
                         Rules for stable hierarchical dynamics:
                         1. Only couple within same scale
-                        2. FREE agents couple only to other FREE agents
-                        3. CONSTITUENTS couple only to other CONSTITUENTS in same meta-agent
+                        2. At SCALE 0: FREE agents ↔ FREE, CONSTITUENTS ↔ CONSTITUENTS
+                        3. At SCALE > 0: All meta-agents couple to each other
 
-                        Rationale: Once agents join a meta-agent, their priors are set
-                        by the parent's belief. This causes rapid belief changes that
-                        destabilize free agents if they remain coupled. The hierarchical
-                        prior mechanism handles cross-group interaction properly.
+                        Rationale: At scale 0, constituents have rapidly-changing priors
+                        from their parent that destabilize free agents. But meta-agents
+                        at higher scales need to couple to each other for coherent
+                        collective dynamics.
                         """
                         my_scale = self._agent_scales[agent_idx]
-                        my_has_parent = self._has_parent[agent_idx]
 
                         neighbors = []
                         for i in range(self.n_agents):
                             if self._agent_scales[i] != my_scale:
                                 continue  # Wrong scale
 
-                            # Free ↔ Free, Constituent ↔ Constituent only
-                            if self._has_parent[i] == my_has_parent:
+                            # At scale 0: separate free from constituents
+                            # At scale > 0: all meta-agents couple together
+                            if my_scale == 0:
+                                my_has_parent = self._has_parent[agent_idx]
+                                if self._has_parent[i] == my_has_parent:
+                                    neighbors.append(i)
+                            else:
+                                # Meta-agents at higher scales couple freely
                                 neighbors.append(i)
 
                         return neighbors
