@@ -890,8 +890,11 @@ class MultiScaleSystem:
 
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            # Initialize Sigma_M to identity everywhere (vectorized)
-            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+            # Initialize Sigma_M to DIFFUSE prior outside support
+            # Large variance = high uncertainty = "don't care about this region"
+            # This prevents huge KL when constituent beliefs differ from default
+            diffuse_variance = 1000.0
+            Sigma_M = np.broadcast_to(diffuse_variance * np.eye(K), (*spatial_shape, K, K)).copy()
 
             # Precompute transports to reference frame
             transports = []
@@ -1012,8 +1015,10 @@ class MultiScaleSystem:
             # Spatial case
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            # Initialize Sigma_M to identity everywhere (vectorized)
-            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+            # Initialize Sigma_M to DIFFUSE prior outside support
+            # Large variance = high uncertainty = "don't care about this region"
+            diffuse_variance = 1000.0
+            Sigma_M = np.broadcast_to(diffuse_variance * np.eye(K), (*spatial_shape, K, K)).copy()
 
             transports = []
             for agent in constituents:
