@@ -133,11 +133,23 @@ class ConsensusDetector:
             kl_div = (kl_div + kl_div_reverse) / 2
 
         # Handle spatial manifolds: kl_div may be array (*spatial,)
-        # For consensus, use MAXIMUM KL over all spatial points (strictest criterion)
-        # This ensures agents agree EVERYWHERE, not just on average
+        # For consensus, use MAXIMUM KL within OVERLAP region only
+        # (Outside overlap, KL is meaningless - one agent doesn't exist there)
         if np.ndim(kl_div) > 0:
-            kl_div_max = np.max(kl_div)  # Strictest: must agree everywhere
-            kl_div_scalar = float(np.mean(kl_div))  # Return average for monitoring
+            # Compute overlap mask: where BOTH agents have support
+            chi_i = agent_i.support.chi_weight
+            chi_j = agent_j.support.chi_weight
+            overlap_mask = (chi_i > 0.01) & (chi_j > 0.01)
+
+            if np.any(overlap_mask):
+                kl_in_overlap = kl_div[overlap_mask]
+                kl_div_max = np.max(kl_in_overlap)
+                kl_div_scalar = float(np.mean(kl_in_overlap))
+            else:
+                # No overlap - can't compute consensus
+                kl_div_max = np.inf
+                kl_div_scalar = np.inf
+
             consensus = kl_div_max < self.belief_threshold
         else:
             kl_div_scalar = float(kl_div)
@@ -294,10 +306,22 @@ class ConsensusDetector:
             kl_div = (kl_div + kl_div_reverse) / 2
 
         # Handle spatial manifolds: kl_div may be array (*spatial,)
-        # For consensus, use MAXIMUM KL over all spatial points (strictest criterion)
+        # For consensus, use MAXIMUM KL within OVERLAP region only
         if np.ndim(kl_div) > 0:
-            kl_div_max = np.max(kl_div)  # Strictest: must agree everywhere
-            kl_div_scalar = float(np.mean(kl_div))  # Return average for monitoring
+            # Compute overlap mask: where BOTH agents have support
+            chi_i = agent_i.support.chi_weight
+            chi_j = agent_j.support.chi_weight
+            overlap_mask = (chi_i > 0.01) & (chi_j > 0.01)
+
+            if np.any(overlap_mask):
+                kl_in_overlap = kl_div[overlap_mask]
+                kl_div_max = np.max(kl_in_overlap)
+                kl_div_scalar = float(np.mean(kl_in_overlap))
+            else:
+                # No overlap - can't compute consensus
+                kl_div_max = np.inf
+                kl_div_scalar = np.inf
+
             consensus = kl_div_max < self.model_threshold
         else:
             kl_div_scalar = float(kl_div)
