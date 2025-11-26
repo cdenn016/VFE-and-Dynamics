@@ -278,6 +278,22 @@ def _build_hierarchical_system(agents, system_cfg, cfg):
     if system_cfg.identical_priors in ("init_copy", "lock"):
         _apply_identical_priors(system, system_cfg)
 
+    # DEBUG: Check supports
+    print("\n[DEBUG] Agent supports after hierarchical system creation:")
+    for i, agent in enumerate(system.agents[0]):
+        chi = agent.support.chi_weight
+        print(f"  Agent {i}: type={type(agent.support).__name__}, chi>0.01={(chi>0.01).sum()}, max={chi.max():.3f}")
+
+    # Check pairwise overlaps
+    print("\n[DEBUG] Pairwise overlaps (chi_i > 0.01 AND chi_j > 0.01):")
+    n = len(system.agents[0])
+    for i in range(n):
+        for j in range(i+1, n):
+            chi_i = system.agents[0][i].support.chi_weight
+            chi_j = system.agents[0][j].support.chi_weight
+            overlap = (chi_i > 0.01) & (chi_j > 0.01)
+            print(f"  {i}↔{j}: {overlap.sum()} pixels")
+
     return system
 
 
