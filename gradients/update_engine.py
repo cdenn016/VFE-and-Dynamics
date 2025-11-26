@@ -34,6 +34,33 @@ from gradients.gauge_fields import retract_to_principal_ball
 from agent.agents import Agent
 
 
+def _clip_mu_update(delta: np.ndarray, max_norm: float) -> np.ndarray:
+    """
+    Clip mean update to prevent explosion.
+
+    Clips the L2 norm of the update at each spatial point to max_norm.
+    For spatial manifolds, delta has shape (*spatial, K).
+
+    Args:
+        delta: Update to apply, shape (*spatial, K) or (K,)
+        max_norm: Maximum L2 norm per spatial point
+
+    Returns:
+        Clipped delta with same shape
+    """
+    if max_norm is None or max_norm <= 0:
+        return delta
+
+    # Compute L2 norm at each spatial point
+    # delta shape: (*spatial, K) or (K,)
+    norm = np.linalg.norm(delta, axis=-1, keepdims=True)  # (*spatial, 1) or (1,)
+
+    # Clip: scale down where norm exceeds max_norm
+    scale = np.where(norm > max_norm, max_norm / (norm + 1e-12), 1.0)
+
+    return delta * scale
+
+
 class GradientApplier:
     """
     Pure gradient application logic shared between all trainers.
@@ -110,14 +137,18 @@ class GradientApplier:
         # Defaults prevent catastrophic explosions while allowing meaningful learning
         trust_region = getattr(config, 'trust_region_sigma', 5.0)  # Frobenius norm cap on whitened tangent
         max_condition = getattr(config, 'sigma_max_condition', 1e6)  # Max eigenvalue ratio
+        max_mu_step = getattr(config, 'max_mu_step', 10.0)  # Max L2 norm of mu update per point
         gauge_margin = getattr(config, 'gauge_margin', 1e-2)
         retraction_mode = getattr(config, 'retraction_mode_phi', 'mod2pi')
 
         # -----------------------------------------------------------------
-        # 1. Update belief mean μ_q (Euclidean)
+        # 1. Update belief mean μ_q (Euclidean with gradient clipping)
         # -----------------------------------------------------------------
         if lr_mu_q != 0.0 and grad.delta_mu_q is not None:
-            agent.mu_q = agent.mu_q + lr_mu_q * grad.delta_mu_q
+            delta = lr_mu_q * grad.delta_mu_q
+            # Clip gradient norm per spatial point to prevent explosions
+            delta = _clip_mu_update(delta, max_mu_step)
+            agent.mu_q = agent.mu_q + delta
 
         # -----------------------------------------------------------------
         # 2. Update belief covariance Σ_q (SPD manifold, GAUGE-COVARIANT)
@@ -136,10 +167,12 @@ class GradientApplier:
                 agent._L_q_cache = None
 
         # -----------------------------------------------------------------
-        # 3. Update prior mean μ_p (Euclidean)
+        # 3. Update prior mean μ_p (Euclidean with gradient clipping)
         # -----------------------------------------------------------------
         if lr_mu_p != 0.0 and grad.delta_mu_p is not None:
-            agent.mu_p = agent.mu_p + lr_mu_p * grad.delta_mu_p
+            delta = lr_mu_p * grad.delta_mu_p
+            delta = _clip_mu_update(delta, max_mu_step)
+            agent.mu_p = agent.mu_p + delta
 
         # -----------------------------------------------------------------
         # 4. Update prior covariance Σ_p (SPD manifold, GAUGE-COVARIANT)
