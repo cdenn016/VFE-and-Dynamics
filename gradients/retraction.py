@@ -109,7 +109,12 @@ def retract_spd(
 
         # Exponentiate symmetric B: exp(τ B) = U diag(exp(τ λ)) U^T
         evals, U = np.linalg.eigh(B)
-        exp_evals = np.exp(step_size * evals)
+
+        # CRITICAL: Clip exponent argument to prevent overflow
+        # exp(50) ≈ 5e21, exp(-50) ≈ 2e-22 - both still representable
+        max_exp_arg = 50.0
+        exp_args = np.clip(step_size * evals, -max_exp_arg, max_exp_arg)
+        exp_evals = np.exp(exp_args)
         E = (U * exp_evals) @ U.T  # U diag(exp_evals) U^T
 
         # Map back: Σ_new = V Λ^{1/2} E Λ^{1/2} V^T
@@ -161,12 +166,16 @@ def _retract_exponential(
     # Matrix exponential of R
     # R is symmetric, so eigendecomposition is stable
     lam, U = np.linalg.eigh(R)
-    
-    # Optional: clip eigenvalues to control conditioning
+
+    # CRITICAL: Clip eigenvalues to prevent overflow in exp()
+    # exp(50) ≈ 5e21, exp(-50) ≈ 2e-22 - both still representable
+    max_exp_arg = 50.0
+    lam = np.clip(lam, -max_exp_arg, max_exp_arg)
+
+    # Optional: further clip to control conditioning
     if max_condition is not None:
-        # Ensure exp(lam) doesn't explode
         lam = np.clip(lam, -np.log(max_condition), np.log(max_condition))
-    
+
     exp_lam = np.exp(lam)
     
     # exp(R) = U diag(exp(λ)) U^T
