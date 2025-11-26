@@ -107,9 +107,9 @@ class GradientApplier:
         lr_phi = getattr(config, 'lr_phi', 0.1)
 
         # Trust regions and condition limits for SPD manifold updates
-        # Defaults prevent catastrophic explosions while allowing meaningful learning
-        trust_region = getattr(config, 'trust_region_sigma', 5.0)  # Frobenius norm cap on whitened tangent
-        max_condition = getattr(config, 'sigma_max_condition', 1e6)  # Max eigenvalue ratio
+        # These are proper manifold constraints, not arbitrary clipping
+        trust_region = getattr(config, 'trust_region_sigma', None)
+        max_condition = getattr(config, 'sigma_max_condition', None)
         gauge_margin = getattr(config, 'gauge_margin', 1e-2)
         retraction_mode = getattr(config, 'retraction_mode_phi', 'mod2pi')
 

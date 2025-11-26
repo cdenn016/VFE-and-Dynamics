@@ -175,10 +175,23 @@ class HierarchicalEvolutionEngine:
                         self.agents = multiscale_system.get_all_active_agents()
                         self.n_agents = len(self.agents)
                         self.config = self.agents[0].config if self.agents else None
+                        # Build scale index for same-scale neighbor lookup
+                        self._agent_scales = [a.scale for a in self.agents]
 
                     def get_neighbors(self, agent_idx):
-                        """Return all active agents for cross-scale coupling."""
-                        return list(range(self.n_agents))
+                        """
+                        Return agents at the SAME scale only.
+
+                        Cross-scale interaction happens through hierarchical priors,
+                        NOT through direct softmax coupling. Mixing scales in coupling
+                        causes gradient instabilities because:
+                        - Different scales have different field magnitudes
+                        - Meta-agent support shapes differ from base agents
+                        - Transport operators between scales can be unstable
+                        """
+                        my_scale = self._agent_scales[agent_idx]
+                        return [i for i in range(self.n_agents)
+                                if self._agent_scales[i] == my_scale]
 
                 wrapper = SystemWrapper(self.system)
                 gradients = compute_natural_gradients(wrapper)
