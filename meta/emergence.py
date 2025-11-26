@@ -186,10 +186,27 @@ class HierarchicalAgent(Agent):
         # Set prior = transported parent belief (handle spatial manifolds)
         if omega.ndim > 2:
             # Spatial manifold: use einsum
-            self.mu_p = np.einsum('...ij,...j->...i', omega, self.parent_meta.mu_q)
-            self.Sigma_p = np.einsum('...ik,...kl,...jl->...ij', omega, self.parent_meta.Sigma_q, omega)
+            mu_p_new = np.einsum('...ij,...j->...i', omega, self.parent_meta.mu_q)
+            Sigma_p_new = np.einsum('...ik,...kl,...jl->...ij', omega, self.parent_meta.Sigma_q, omega)
+
+            # CRITICAL: Only update prior where parent has support
+            # Outside parent's support, renormalized values are defaults (0, I)
+            # which causes huge KL if constituent's belief differs there
+            parent_chi = self.parent_meta.support.chi_weight
+            support_threshold = 0.01
+
+            # Blend: use new prior where parent has support, keep old elsewhere
+            blend_mask = parent_chi > support_threshold
+            blend_weight = np.where(blend_mask, parent_chi, 0.0)[..., None]  # (*spatial, 1)
+
+            # Smooth blending to avoid discontinuities
+            self.mu_p = blend_weight * mu_p_new + (1 - blend_weight) * self.mu_p
+
+            # For Sigma: expand blend_weight to matrix shape
+            blend_weight_mat = blend_weight[..., None]  # (*spatial, 1, 1)
+            self.Sigma_p = blend_weight_mat * Sigma_p_new + (1 - blend_weight_mat) * self.Sigma_p
         else:
-            # Point manifold
+            # Point manifold - no blending needed
             self.mu_p = omega @ self.parent_meta.mu_q
             self.Sigma_p = omega @ self.parent_meta.Sigma_q @ omega.T
 
@@ -873,8 +890,11 @@ class MultiScaleSystem:
 
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            # Initialize Sigma_M to identity everywhere (vectorized)
-            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+            # Initialize Sigma_M to DIFFUSE prior outside support
+            # Large variance = high uncertainty = "don't care about this region"
+            # This prevents huge KL when constituent beliefs differ from default
+            diffuse_variance = 1000.0
+            Sigma_M = np.broadcast_to(diffuse_variance * np.eye(K), (*spatial_shape, K, K)).copy()
 
             # Precompute transports to reference frame
             transports = []
@@ -995,8 +1015,10 @@ class MultiScaleSystem:
             # Spatial case
             spatial_shape = ref.base_manifold.shape
             mu_M = np.zeros((*spatial_shape, K))
-            # Initialize Sigma_M to identity everywhere (vectorized)
-            Sigma_M = np.broadcast_to(np.eye(K), (*spatial_shape, K, K)).copy()
+            # Initialize Sigma_M to DIFFUSE prior outside support
+            # Large variance = high uncertainty = "don't care about this region"
+            diffuse_variance = 1000.0
+            Sigma_M = np.broadcast_to(diffuse_variance * np.eye(K), (*spatial_shape, K, K)).copy()
 
             transports = []
             for agent in constituents:
