@@ -49,11 +49,33 @@ import pickle
 import sys
 import os
 
-# Add parent directory to path for imports
-_this_dir = Path(__file__).parent.resolve()
-_parent_dir = _this_dir.parent
-sys.path.insert(0, str(_parent_dir))
-os.chdir(_parent_dir)  # Change to project root for relative imports
+# Setup paths - add project root to Python path
+_this_file = Path(__file__).resolve()
+_this_dir = _this_file.parent
+_project_root = _this_dir.parent
+sys.path.insert(0, str(_project_root))
+sys.path.insert(0, str(_this_dir))
+os.chdir(_project_root)
+
+# Now import from sibling modules directly (not through package)
+from detector import (
+    CriticalPoint, CriticalPointType, CriticalPointScan,
+    scan_for_critical_points, compute_gradient_norm,
+    find_critical_point_gradient_descent, find_critical_points_random_restarts,
+    compute_energy_landscape, compute_gradient_norm_field
+)
+from stability import (
+    classify_critical_point, classify_all_critical_points,
+    compute_full_hessian, analyze_hessian
+)
+from bifurcation import (
+    scan_for_bifurcations, refine_bifurcation_point,
+    BifurcationDiagram, BifurcationEvent
+)
+from visualization import (
+    plot_critical_point_summary, plot_energy_landscape_2d,
+    plot_gradient_norm_field, plot_bifurcation_diagram
+)
 
 
 def create_test_system(n_agents: int, K: int, seed: int):
@@ -117,9 +139,37 @@ def create_test_system(n_agents: int, K: int, seed: int):
     return MultiAgentSystem(agents, system_cfg, manifold)
 
 
+def quick_scan(system, verbose=True):
+    """Quick scan with default parameters."""
+    scan = scan_for_critical_points(
+        system,
+        agent_idx=0,
+        param='mu_q',
+        dims=(0, 1),
+        grid_range=(-2.0, 2.0),
+        grid_resolution=15,
+        gradient_threshold=0.2,
+        refine=True,
+        verbose=verbose
+    )
+    classify_all_critical_points(system, scan, agent_idx=0)
+
+    if verbose:
+        print(f"\nSummary:")
+        print(f"  Total critical points: {len(scan.critical_points)}")
+        print(f"  Minima (stable): {scan.n_minima}")
+        print(f"  Maxima (unstable): {scan.n_maxima}")
+        print(f"  Saddles: {scan.n_saddles}")
+
+        global_min = scan.get_global_minimum()
+        if global_min:
+            print(f"  Global minimum energy: {global_min.energy:.4f}")
+
+    return scan
+
+
 def run_demo():
     """Quick demonstration."""
-    from critical_points import quick_scan, plot_critical_point_summary
     import matplotlib.pyplot as plt
 
     print("=" * 60)
@@ -148,13 +198,6 @@ def run_demo():
 
 def run_scan():
     """Full critical point scan."""
-    from critical_points import (
-        scan_for_critical_points,
-        classify_all_critical_points,
-        plot_critical_point_summary,
-        plot_energy_landscape_2d,
-        plot_gradient_norm_field
-    )
     import matplotlib.pyplot as plt
 
     print("=" * 60)
@@ -241,11 +284,6 @@ def run_scan():
 
 def run_bifurcation():
     """Bifurcation analysis."""
-    from critical_points import (
-        scan_for_bifurcations,
-        refine_bifurcation_point,
-        plot_bifurcation_diagram
-    )
     import matplotlib.pyplot as plt
 
     print("=" * 60)

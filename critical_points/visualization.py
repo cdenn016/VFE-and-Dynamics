@@ -21,9 +21,14 @@ from mpl_toolkits.mplot3d import Axes3D
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
-from .detector import CriticalPoint, CriticalPointScan, CriticalPointType
-from .stability import HessianAnalysis
-from .bifurcation import BifurcationDiagram, BifurcationEvent
+try:
+    from .detector import CriticalPoint, CriticalPointScan, CriticalPointType
+    from .stability import HessianAnalysis
+    from .bifurcation import BifurcationDiagram, BifurcationEvent
+except ImportError:
+    from detector import CriticalPoint, CriticalPointScan, CriticalPointType
+    from stability import HessianAnalysis
+    from bifurcation import BifurcationDiagram, BifurcationEvent
 
 
 # Color scheme for critical point types
