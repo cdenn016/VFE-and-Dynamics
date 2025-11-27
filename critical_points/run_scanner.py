@@ -138,7 +138,7 @@ def create_test_system(n_agents: int, K: int, seed: int):
 
         agents.append(agent)
 
-    return MultiAgentSystem(agents, system_cfg, manifold)
+    return MultiAgentSystem(agents, system_cfg)
 
 
 def quick_scan(system, verbose=True):
