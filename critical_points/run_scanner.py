@@ -47,9 +47,13 @@ import numpy as np
 from pathlib import Path
 import pickle
 import sys
+import os
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+_this_dir = Path(__file__).parent.resolve()
+_parent_dir = _this_dir.parent
+sys.path.insert(0, str(_parent_dir))
+os.chdir(_parent_dir)  # Change to project root for relative imports
 
 
 def create_test_system(n_agents: int, K: int, seed: int):
