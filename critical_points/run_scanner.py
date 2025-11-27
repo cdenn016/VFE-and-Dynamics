@@ -48,34 +48,60 @@ from pathlib import Path
 import pickle
 import sys
 import os
+import importlib.util
 
 # Setup paths - add project root to Python path
 _this_file = Path(__file__).resolve()
 _this_dir = _this_file.parent
 _project_root = _this_dir.parent
-sys.path.insert(0, str(_project_root))
-sys.path.insert(0, str(_this_dir))
+
+# Add paths BEFORE any imports
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+if str(_this_dir) not in sys.path:
+    sys.path.insert(0, str(_this_dir))
+
 os.chdir(_project_root)
 
-# Now import from sibling modules directly (not through package)
-from detector import (
-    CriticalPoint, CriticalPointType, CriticalPointScan,
-    scan_for_critical_points, compute_gradient_norm,
-    find_critical_point_gradient_descent, find_critical_points_random_restarts,
-    compute_energy_landscape, compute_gradient_norm_field
-)
-from stability import (
-    classify_critical_point, classify_all_critical_points,
-    compute_full_hessian, analyze_hessian
-)
-from bifurcation import (
-    scan_for_bifurcations, refine_bifurcation_point,
-    BifurcationDiagram, BifurcationEvent
-)
-from visualization import (
-    plot_critical_point_summary, plot_energy_landscape_2d,
-    plot_gradient_norm_field, plot_bifurcation_diagram
-)
+# Helper to load module from file path directly
+def _load_module(name, file_path):
+    spec = importlib.util.spec_from_file_location(name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# Load modules directly from files (bypasses package system entirely)
+_detector = _load_module("_cp_detector", _this_dir / "detector.py")
+_stability = _load_module("_cp_stability", _this_dir / "stability.py")
+_bifurcation = _load_module("_cp_bifurcation", _this_dir / "bifurcation.py")
+_visualization = _load_module("_cp_visualization", _this_dir / "visualization.py")
+
+# Import what we need
+CriticalPoint = _detector.CriticalPoint
+CriticalPointType = _detector.CriticalPointType
+CriticalPointScan = _detector.CriticalPointScan
+scan_for_critical_points = _detector.scan_for_critical_points
+compute_gradient_norm = _detector.compute_gradient_norm
+find_critical_point_gradient_descent = _detector.find_critical_point_gradient_descent
+find_critical_points_random_restarts = _detector.find_critical_points_random_restarts
+compute_energy_landscape = _detector.compute_energy_landscape
+compute_gradient_norm_field = _detector.compute_gradient_norm_field
+
+classify_critical_point = _stability.classify_critical_point
+classify_all_critical_points = _stability.classify_all_critical_points
+compute_full_hessian = _stability.compute_full_hessian
+analyze_hessian = _stability.analyze_hessian
+
+scan_for_bifurcations = _bifurcation.scan_for_bifurcations
+refine_bifurcation_point = _bifurcation.refine_bifurcation_point
+BifurcationDiagram = _bifurcation.BifurcationDiagram
+BifurcationEvent = _bifurcation.BifurcationEvent
+
+plot_critical_point_summary = _visualization.plot_critical_point_summary
+plot_energy_landscape_2d = _visualization.plot_energy_landscape_2d
+plot_gradient_norm_field = _visualization.plot_gradient_norm_field
+plot_bifurcation_diagram = _visualization.plot_bifurcation_diagram
 
 
 def create_test_system(n_agents: int, K: int, seed: int):
