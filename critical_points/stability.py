@@ -20,10 +20,16 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
-from .detector import (
-    CriticalPoint, CriticalPointType, CriticalPointScan,
-    compute_gradient_norm, extract_system_state, set_system_state
-)
+try:
+    from .detector import (
+        CriticalPoint, CriticalPointType, CriticalPointScan,
+        compute_gradient_norm, extract_system_state, set_system_state
+    )
+except ImportError:
+    from detector import (
+        CriticalPoint, CriticalPointType, CriticalPointScan,
+        compute_gradient_norm, extract_system_state, set_system_state
+    )
 from gradients.free_energy_clean import compute_total_free_energy
 
 
