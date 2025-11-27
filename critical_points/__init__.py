@@ -72,7 +72,7 @@ Date: November 2025
 # Core Detection
 # =============================================================================
 
-from .detector import (
+from critical_points.detector import (
     # Data classes
     CriticalPoint,
     CriticalPointType,
@@ -102,7 +102,7 @@ from .detector import (
 # Stability Analysis
 # =============================================================================
 
-from .stability import (
+from critical_points.stability import (
     # Data classes
     HessianAnalysis,
 
@@ -128,7 +128,7 @@ from .stability import (
 # Bifurcation Detection
 # =============================================================================
 
-from .bifurcation import (
+from critical_points.bifurcation import (
     # Data classes
     BifurcationType,
     BifurcationEvent,
@@ -150,7 +150,7 @@ from .bifurcation import (
 # Visualization
 # =============================================================================
 
-from .visualization import (
+from critical_points.visualization import (
     # 2D/3D landscape plots
     plot_energy_landscape_2d,
     plot_energy_landscape_3d,

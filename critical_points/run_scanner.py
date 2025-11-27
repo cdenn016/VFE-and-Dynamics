@@ -53,26 +53,28 @@ import os
 _this_file = Path(__file__).resolve()
 _this_dir = _this_file.parent
 _project_root = _this_dir.parent
-sys.path.insert(0, str(_project_root))
-sys.path.insert(0, str(_this_dir))
+
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 os.chdir(_project_root)
 
-# Now import from sibling modules directly (not through package)
-from detector import (
+# Standard absolute imports (same style as rest of codebase)
+from critical_points.detector import (
     CriticalPoint, CriticalPointType, CriticalPointScan,
     scan_for_critical_points, compute_gradient_norm,
     find_critical_point_gradient_descent, find_critical_points_random_restarts,
     compute_energy_landscape, compute_gradient_norm_field
 )
-from stability import (
+from critical_points.stability import (
     classify_critical_point, classify_all_critical_points,
     compute_full_hessian, analyze_hessian
 )
-from bifurcation import (
+from critical_points.bifurcation import (
     scan_for_bifurcations, refine_bifurcation_point,
     BifurcationDiagram, BifurcationEvent
 )
-from visualization import (
+from critical_points.visualization import (
     plot_critical_point_summary, plot_energy_landscape_2d,
     plot_gradient_norm_field, plot_bifurcation_diagram
 )

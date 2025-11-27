@@ -25,26 +25,16 @@ from typing import List, Dict, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-try:
-    from .detector import (
-        CriticalPoint, CriticalPointType, CriticalPointScan,
-        compute_gradient_norm, extract_system_state, set_system_state,
-        find_critical_point_gradient_descent, track_critical_points_under_parameter_change
-    )
-    from .stability import (
-        HessianAnalysis, compute_hessian_numerical, analyze_hessian,
-        compute_full_hessian, classify_critical_point
-    )
-except ImportError:
-    from detector import (
-        CriticalPoint, CriticalPointType, CriticalPointScan,
-        compute_gradient_norm, extract_system_state, set_system_state,
-        find_critical_point_gradient_descent, track_critical_points_under_parameter_change
-    )
-    from stability import (
-        HessianAnalysis, compute_hessian_numerical, analyze_hessian,
-        compute_full_hessian, classify_critical_point
-    )
+from critical_points.detector import (
+    CriticalPoint, CriticalPointType, CriticalPointScan,
+    compute_gradient_norm, extract_system_state, set_system_state,
+    find_critical_point_gradient_descent, find_critical_points_random_restarts,
+    track_critical_points_under_parameter_change
+)
+from critical_points.stability import (
+    HessianAnalysis, compute_hessian_numerical, analyze_hessian,
+    compute_full_hessian, classify_critical_point
+)
 from gradients.free_energy_clean import compute_total_free_energy
 
 
@@ -248,7 +238,6 @@ def scan_for_bifurcations(
         set_system_state(system, initial_state)
 
         # Find critical points with multiple restarts
-        from .detector import find_critical_points_random_restarts
         critical_points = find_critical_points_random_restarts(
             system,
             n_restarts=5,
@@ -348,7 +337,6 @@ def refine_bifurcation_point(
         setattr(system.config, param_name, param_mid)
         set_system_state(system, initial_state)
 
-        from .detector import find_critical_points_random_restarts
         critical_points = find_critical_points_random_restarts(
             system,
             n_restarts=5,
@@ -527,7 +515,6 @@ def compute_codimension_one_bifurcation_normal_form(
 
     # Find critical point at bifurcation
     set_system_state(system, initial_state)
-    from .detector import find_critical_point_gradient_descent
 
     cp = find_critical_point_gradient_descent(
         system,

@@ -21,14 +21,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
-try:
-    from .detector import CriticalPoint, CriticalPointScan, CriticalPointType
-    from .stability import HessianAnalysis
-    from .bifurcation import BifurcationDiagram, BifurcationEvent
-except ImportError:
-    from detector import CriticalPoint, CriticalPointScan, CriticalPointType
-    from stability import HessianAnalysis
-    from bifurcation import BifurcationDiagram, BifurcationEvent
+from critical_points.detector import (
+    CriticalPoint, CriticalPointScan, CriticalPointType,
+    compute_energy_landscape, scan_for_critical_points
+)
+from critical_points.stability import HessianAnalysis
+from critical_points.bifurcation import BifurcationDiagram, BifurcationEvent
 
 
 # Color scheme for critical point types
@@ -671,8 +669,6 @@ def create_animation_frames(
     Returns:
         List of paths to frame images
     """
-    from .detector import compute_energy_landscape, scan_for_critical_points
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
